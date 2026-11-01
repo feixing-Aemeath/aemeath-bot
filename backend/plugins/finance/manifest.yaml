@@ -1,0 +1,57 @@
+id: finance
+name: 记账
+version: 0.1.0
+icon: yensign.circle
+description: 记账只管记账：导入本地账单，计算生活费周期、分类、退款和报销；不付款、不登录账户，不提供投资理财借贷建议
+platforms: [any]
+permissions: []
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: carlotta, accent: "#C93468"}
+# plugins.enabled defaults to 0 in core/db.py, as for every opt-in plugin.
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    topic: {type: string, minLength: 1, maxLength: 40, default: 财务}
+    cron: {type: string, default: "*/5 * * * *"}
+    reimburse_cron: {type: string, default: "0 21 * * sun"}
+    report_cron: {type: string, default: "0 9 * * *"}
+    allowance_day: {type: integer, minimum: 1, maximum: 31, default: 1}
+    allowance_amount: {type: number, exclusiveMinimum: 0, default: 2000}
+    family:
+      type: array
+      items: {type: string, minLength: 1, maxLength: 100}
+      uniqueItems: true
+      default: []
+    # Charges the family pays back whatever day it is (AI memberships, API credit): a keyword in
+    # the merchant or the item. They stay out of the budget; a red packet from family that pays
+    # one back is not extra income.
+    family_pays:
+      type: array
+      items: {type: string, minLength: 1, maxLength: 100}
+      uniqueItems: true
+      default: []
+    extra_income_keywords:
+      type: array
+      items: {type: string, minLength: 1, maxLength: 100}
+      uniqueItems: true
+      default: [分红]
+    # Off: only the periods the user names (finance_home) count as home. On: also every weekend
+    # between home_from and home_until, in the current and the previous budget period.
+    # Where the user's money moves. Alipay paid from a bank card leaves no balance and needs no
+    # bill of its own; the card's statement has those payments.
+    sources:
+      type: array
+      items: {enum: [wechat, alipay, cmb]}
+      minItems: 1
+      uniqueItems: true
+      default: [wechat, alipay, cmb]
+    every_weekend_at_home: {type: boolean, default: false}
+    home_from: {type: string, pattern: "^(mon|tue|wed|thu|fri|sat|sun) ([01][0-9]|2[0-4]):[0-5][0-9]$", default: "fri 17:00"}
+    home_until: {type: string, pattern: "^(mon|tue|wed|thu|fri|sat|sun) ([01][0-9]|2[0-4]):[0-5][0-9]$", default: "sun 24:00"}
+    rules:
+      type: object
+      additionalProperties:
+        enum: [吃饭, 交通, 购物, 娱乐, 会员订阅, 学习, 通讯, 医疗, 其他]
+      default: {}

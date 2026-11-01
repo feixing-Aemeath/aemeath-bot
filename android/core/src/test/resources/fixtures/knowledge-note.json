@@ -1,0 +1,10 @@
+{
+  "path": "知识库/课程/整理/最短路径.md", "name": "最短路径.md", "title": "最短路径：Dijkstra",
+  "kind": "note", "format": "md", "size": 2048, "modified_at": "2026-10-29T03:10:00+08:00",
+  "area": "知识库/课程", "readers": ["助理"],
+  "content": "要点。\n\n## 来源\n\n- [[知识库/课程/第5章 图.pdf]] 第 18 页\n\n## 我的批注\n\n看 [[图的遍历|遍历]]。",
+  "extracted": false, "truncated": false,
+  "sources": [{"path": "知识库/课程/第5章 图.pdf", "label": "第 18 页"}],
+  "notes": [], "organized_by": "codex", "organized_at": "2026-10-29T03:10:00+08:00",
+  "status": null, "error": null
+}

@@ -1,0 +1,22 @@
+id: weather
+name: 天气
+version: 0.1.0
+icon: cloud.sun
+description: 定时读取天气预报，给出带不带伞、穿什么、防晒的提醒；每天早上让 Agent 结合待办和课表写一段今日提醒
+platforms: [any]
+permissions: [network]
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: aemeath, accent: "#E86A9A"}  # 助理Bot's: the App shows it on her page
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    place: {type: string, minLength: 1, maxLength: 40, default: 上海, description: Name shown on the cards}
+    latitude: {type: number, minimum: -90, maximum: 90}
+    longitude: {type: number, minimum: -180, maximum: 180}
+    brief_agent:
+      enum: [deepseek, claude_code, codex]
+      default: deepseek
+      description: The Agent that writes the morning reminder first (the others follow if it fails)
+    brief_cron: {type: string, default: "30 6 * * *", description: When the morning reminder is written}

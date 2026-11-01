@@ -1,0 +1,9 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.jks
+*.keystore
+gradle/wrapper/gradle-wrapper.jar
+gradlew
+gradlew.bat

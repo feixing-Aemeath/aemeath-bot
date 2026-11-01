@@ -1,0 +1,22 @@
+id: weekly_review
+name: 本周回顾
+version: 0.1.0
+icon: calendar
+description: 汇总这一周的待办、作业、课程、活动、健康和 Token，由助理写回顾与下周提醒
+platforms: [any]
+permissions: []
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: aemeath, accent: "#E86A9A"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    review_agent:
+      enum: [deepseek, claude_code, codex]
+      default: deepseek
+      description: The Agent that writes the weekly review first (the others follow if it fails)
+    review_cron:
+      type: string
+      default: "0 21 * * 0"
+      description: When to write the review (crontab weekdays, 0 or 7 is Sunday)

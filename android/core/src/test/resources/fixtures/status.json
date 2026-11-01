@@ -1,0 +1,8 @@
+{"online": true, "platform": "linux", "apple_mode": "fake",
+ "agents": {"claude_code": {"available": true, "authentication": "unchecked"},
+            "codex": {"available": false, "authentication": "unchecked"}},
+ "last_run": {"id": "91a99011-1063-4f38-adef-13b5db6ca51f", "job": "extract_todos",
+              "harness": "claude_code", "started_at": "2026-10-15T16:54:37.453973Z",
+              "finished_at": "2026-10-15T16:54:37.455389Z", "status": "failed",
+              "error": "quota_exhausted", "attempt": 1},
+ "pending_sync": 2}

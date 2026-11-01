@@ -1,0 +1,31 @@
+id: timetable
+name: 课表
+version: 0.1.0
+icon: calendar
+description: 截图读取 Chrome 里打开的学校网站个人日程（周历），本机识别文字；每 10 分钟刷新这一页防止掉线，不登录、不点击
+platforms: [macos, windows]
+permissions: [screen_recording]
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: moning, accent: "#D65F63"}  # 作业Bot, with homework: one character, one Bot in the App
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    helper: {type: string, description: Absolute path to the read-only screen helper (the one qq_screen uses)}
+    page_title:
+      type: string
+      minLength: 2
+      maxLength: 80
+      default: 学校门户-个人日程
+      description: Title of the Chrome window showing the timetable page (the title of its current tab)
+    keep_alive:
+      type: boolean
+      default: true
+      description: Reload the page in Chrome every 10 minutes so the site does not log out for being idle (needs 自动化 → Google Chrome)
+    class_alarm_minutes:
+      type: integer
+      minimum: 0
+      maximum: 10080
+      default: 15
+      description: Minutes before each class to alert; 0 removes this plugin's calendar events

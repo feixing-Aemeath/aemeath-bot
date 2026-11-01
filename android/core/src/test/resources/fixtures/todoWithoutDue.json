@@ -1,0 +1,6 @@
+{"title": "交实验报告", "notes": "", "due_at": null, "has_time": false,
+ "source_plugin": "qq_screen,feishu", "source_refs": ["m1", "m2"],
+ "source_excerpt": "信息核对", "confidence": 0.9, "created_by": "agent", "id": "t2",
+ "status": "completed", "dedup_key": "k2", "reminder_id": "fake-reminders-t2",
+ "calendar_event_id": null, "created_at": "2026-10-15T16:54:37.448001Z",
+ "updated_at": "2026-10-15T16:54:38Z", "sync_status": "synced", "sync_error": null}

@@ -1,0 +1,180 @@
+# XcodeGen spec. The .xcodeproj is generated (`xcodegen generate`) and not committed.
+name: Assistant
+
+options:
+  bundleIdPrefix: com.example.assistant24h
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+    watchOS: "10.0"
+  createIntermediateGroups: true
+  developmentLanguage: zh-Hans
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # Free personal team: pick it in Xcode (Signing & Capabilities) and change the prefix
+    # below to something unique to you. No paid-only capabilities are used.
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    BUNDLE_ID_PREFIX: com.example.assistant24h
+
+packages:
+  AssistantCore:
+    path: Packages/AssistantCore
+
+targets:
+  Assistant-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - App/iOS
+      # The App icon (Icon Composer, Liquid Glass), from 助理's sticker by scripts/make-app-icon.swift.
+      - path: App/AppIcon.icon
+        buildPhase: resources
+      # Plugin stickers (docs/mascot.md), copied as the folder "stickers".
+      - path: Design/stickers
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: AssistantCore
+        products:
+          - AssistantCore
+          - AssistantUI
+      # Embeds the watch app in the iPhone App ("Embed Watch Content", copied to
+      # Assistant-iOS.app/Watch/), so installing the iPhone App also installs it on the watch.
+      - target: Assistant-watchOS
+    info:
+      path: Generated/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: Aemeath Bot
+        UILaunchScreen: {}
+        # The backend over Tailscale; tailscale serve gives HTTPS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # HealthSync reads these and uploads them to the user's own Mac (docs/api.md).
+        NSHealthShareUsageDescription: Aemeath Bot 读取睡眠、心率、HRV、步数和训练记录，只上传到你自己的 Mac mini，用来生成健康简报和准备度。
+    entitlements:
+      path: Generated/iOS.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
+        # New samples wake the App to upload them (HealthSync's observer queries).
+        com.apple.developer.healthkit.background-delivery: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).ios
+        TARGETED_DEVICE_FAMILY: "1,2"
+    scheme: {}
+
+  Assistant-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - App/macOS
+      # The App icon (Icon Composer, Liquid Glass), from 助理's sticker by scripts/make-app-icon.swift.
+      - path: App/AppIcon.icon
+        buildPhase: resources
+      # Plugin stickers (docs/mascot.md), copied as the folder "stickers".
+      - path: Design/stickers
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: AssistantCore
+        products:
+          - AssistantCore
+          - AssistantUI
+    info:
+      path: Generated/macOS-Info.plist
+      properties:
+        CFBundleDisplayName: Aemeath Bot
+        LSApplicationCategoryType: public.app-category.productivity
+        # The backend on this Mac (127.0.0.1) or over Tailscale; tailscale serve gives HTTPS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).mac
+    scheme: {}
+
+  # Single-target watch app, the companion of the iPhone App: it gets its data from the iPhone
+  # over WatchConnectivity (watchOS has no Tailscale) and never contacts the backend. It ships
+  # inside the iPhone App (see Assistant-iOS); its own scheme is for running it on the watch
+  # directly while developing.
+  Assistant-watchOS:
+    type: application
+    platform: watchOS
+    sources:
+      - App/watchOS
+      # The App icon (Icon Composer, Liquid Glass), from 助理's sticker by scripts/make-app-icon.swift.
+      - path: App/AppIcon.icon
+        buildPhase: resources
+      # Plugin stickers (docs/mascot.md), copied as the folder "stickers".
+      - path: Design/stickers
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: AssistantCore
+        products:
+          - AssistantCore
+          - AssistantUI
+      - target: Assistant-watchWidget
+    info:
+      path: Generated/watchOS-Info.plist
+      properties:
+        CFBundleDisplayName: Aemeath Bot
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: $(BUNDLE_ID_PREFIX).ios
+        # Needs the iPhone for its data, so it is installed together with the iPhone App.
+        WKRunsIndependentlyOfCompanionApp: false
+        # Shared with the complication; see ComplicationData.
+        AssistantAppGroup: group.$(BUNDLE_ID_PREFIX)
+    entitlements:
+      path: Generated/watchOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(BUNDLE_ID_PREFIX)
+    settings:
+      base:
+        # A companion watch app's ID starts with the iPhone App's.
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).ios.watch
+        # Archived inside the iPhone App, not as a product of its own.
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  # Watch face complication: today's remaining todos, read from the App Group.
+  Assistant-watchWidget:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - App/watchWidget
+    dependencies:
+      - package: AssistantCore
+        products:
+          - AssistantCore
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    info:
+      path: Generated/watchWidget-Info.plist
+      properties:
+        CFBundleDisplayName: 剩余待办
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        AssistantAppGroup: group.$(BUNDLE_ID_PREFIX)
+    entitlements:
+      path: Generated/watchWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(BUNDLE_ID_PREFIX)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).ios.watch.widget

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.assistant.photo-export</string>
+<key>CFBundleName</key><string>Assistant Photo Export</string>
+<key>NSPhotoLibraryUsageDescription</key><string>只读上课时拍摄的 PPT 和板书，识别后存入本机知识库；不会修改照片库。</string>
+</dict></plist>

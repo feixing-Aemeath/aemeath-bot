@@ -1,0 +1,6 @@
+.gradle/
+.kotlin/
+build/
+*.ico
+*.msi
+*.log

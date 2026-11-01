@@ -1,0 +1,27 @@
+id: class_photos
+name: 课堂照片
+version: 0.1.0
+icon: camera
+description: 按拍摄时间匹配课程，在本机识别 PPT 和板书后导入知识库。
+platforms: [macos]
+permissions: [photos]
+schedule: null
+provides: []
+mascot: {sticker: orange_daisy, accent: "#E57A3C"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    helper: {type: string, minLength: 1}
+    cron: {type: string, default: '*/30 * * * *'}
+    lookback_days: {type: integer, minimum: 1, maximum: 30, default: 3}
+    before_minutes: {type: integer, minimum: 0, maximum: 120, default: 5}
+    after_minutes: {type: integer, minimum: 0, maximum: 120, default: 10}
+    min_text_chars: {type: integer, minimum: 1, maximum: 10000, default: 15}
+    course_topics:
+      type: object
+      additionalProperties: {type: string, minLength: 1, maxLength: 40}
+    skip_courses:
+      type: array
+      uniqueItems: true
+      items: {type: string, minLength: 1}

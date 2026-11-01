@@ -1,0 +1,61 @@
+id: qq_screen
+name: QQ 屏幕读取
+version: 0.2.0
+icon: message
+description: 白名单聊天区域截图与本地 OCR；默认只读会话列表；按需点开会把该群标为已读，手机红点也会消失
+platforms: [macos, windows]
+permissions: [screen_recording, accessibility]
+schedule: null
+provides: [source, cards]
+mascot: {sticker: red_ribbon, accent: "#E8383F"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    whitelist:
+      type: array
+      uniqueItems: true
+      items: {type: string, minLength: 1}
+      default: []
+    preview_only:
+      type: boolean
+      default: true
+      description: Read conversation-list previews; explicitly authorized open_on_demand chats may be opened
+    self_names:
+      type: array
+      items: {type: string, minLength: 1}
+      default: []
+      description: 姓名、学号或昵称，只在本机匹配，不传给模型
+    open_on_demand:
+      type: array
+      uniqueItems: true
+      items: {type: string, minLength: 1}
+      default: []
+      description: whitelist 的子集；点开会标为已读，手机红点也会消失
+    on_demand_pages: {type: integer, minimum: 1, maximum: 20, default: 2}
+    park_chat:
+      type: string
+      minLength: 1
+      description: 按需点开以后切到这个白名单会话；不填时刚点开的群会一直开着，新消息可能继续被标为已读
+    max_opens_per_chat_per_day: {type: integer, minimum: 0, maximum: 100, default: 4}
+    max_pages: {type: integer, minimum: 1, maximum: 100, default: 20}
+    initial_pages:
+      type: integer
+      minimum: 1
+      maximum: 20
+      default: 2
+      description: Screens to read on the first run of a chat, before a cursor exists
+    helper: {type: string, description: Absolute path to the locally calibrated read-only screen helper}
+    layout:
+      type: object
+      additionalProperties: false
+      description: Calibration of the chat geometry, fractions of the captured area
+      properties:
+        incoming_max_x: {type: number, minimum: 0, maximum: 1}
+        outgoing_min_right: {type: number, minimum: 0, maximum: 1}
+        center_tolerance: {type: number, minimum: 0, maximum: 0.5}
+        name_height_ratio: {type: number, exclusiveMinimum: 0, maximum: 1}
+        bubble_gap: {type: number, exclusiveMinimum: 0, maximum: 10}
+        row_overlap: {type: number, exclusiveMinimum: 0, maximum: 1}
+        edge_margin: {type: number, minimum: 0, maximum: 0.1}
+        space_gap: {type: number, minimum: 0, maximum: 10}

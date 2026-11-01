@@ -1,0 +1,44 @@
+id: grades
+name: 学分成绩
+version: 0.1.0
+icon: graduationcap
+description: 绩点、综测、体测和已修学分；Agent 读到出成绩的消息时记下，也可以导入教务系统导出的 CSV
+platforms: [any]
+permissions: []
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: red_ribbon, accent: "#E8383F"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    required_credits:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 400
+      description: Credits needed to graduate
+    comprehensive_required:
+      type: number
+      minimum: 0
+      maximum: 1000
+      description: 综测 (comprehensive evaluation) score needed to graduate, until the Agent records the school's
+    comprehensive_full:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 1000
+      default: 100
+      description: 综测 full mark
+    fitness_full:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 1000
+      default: 100
+      description: 体测 (fitness test) full mark
+    gpa_scale:
+      enum: [standard4, pku4, linear5]
+      default: standard4
+      description: "standard4: 90+ 4, 80-89 3, 70-79 2, 60-69 1; pku4: 4 - 3(100-x)^2/1600; linear5: (x-50)/10"
+    import_csv:
+      type: string
+      pattern: "^(?:/|[A-Za-z]:[\\\\/]).+\\.csv$"
+      description: Absolute path (/… or C:\…) of a CSV exported from the school system (课程, 学分, 成绩, 学期, 类别), read every hour

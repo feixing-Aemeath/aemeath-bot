@@ -1,0 +1,11 @@
+{"id": "feishu", "name": "飞书", "version": "0.1.0", "icon": "message",
+  "description": "官方 SDK，以用户身份增量读取白名单会话", "platforms": ["linux", "macos"],
+  "permissions": ["network"], "schedule": null, "provides": ["source", "cards"],
+  "config_schema": {"type": "object", "additionalProperties": false,
+    "properties": {"whitelist": {"type": "array", "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}, "default": []},
+      "initial_lookback_hours": {"type": "integer", "minimum": 1, "maximum": 720,
+                                 "default": 24}}},
+  "mascot": {"sticker": null, "accent": "#22B8CF"},
+  "enabled": false, "config": {}, "last_run_at": null, "state": "disabled",
+  "error": null}

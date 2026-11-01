@@ -1,0 +1,11 @@
+{"title": "提交实验报告", "notes": "", "due_at": "2026-10-16T10:00:00Z", "has_time": true,
+ "source_plugin": "qq_screen", "source_refs": ["e87d5be1-6277-4a4a-9fb9-4a88642399a2"],
+ "source_excerpt": "周五18点前提交实验报告", "confidence": 0.93, "created_by": "agent",
+ "sources": [{"message_id": "e87d5be1-6277-4a4a-9fb9-4a88642399a2",
+   "plugin": "qq_screen", "chat_name": "软件工程2班", "sender": "李老师",
+   "sent_at": "2026-10-15T12:41:00Z"}],
+ "id": "0259cf70-db24-4ef5-9693-21d5fbc2bd0c", "status": "pending",
+ "dedup_key": "5eaf728f3b7cb2edb41f84c31cc6fb53e059222b21538e900091727e4f1c858b",
+ "reminder_id": null, "calendar_event_id": null,
+ "created_at": "2026-10-15T19:05:45.157751Z", "updated_at": "2026-10-15T19:05:45.157751Z",
+ "sync_status": "pending", "sync_error": null}

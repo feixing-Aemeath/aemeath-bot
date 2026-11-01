@@ -1,0 +1,26 @@
+id: homework
+name: 作业
+version: 0.1.0
+icon: book
+description: 从课程群的待办里整理作业和截止时间，按课程分组；交完在待办里勾掉
+platforms: [any]
+permissions: []
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: moning, accent: "#D65F63"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    course_chats:
+      type: array
+      uniqueItems: true
+      items: {type: string, minLength: 1}
+      default: []
+      description: Chats (e.g. course groups) whose todos all count as homework; the chat name is the course
+    keywords:
+      type: array
+      uniqueItems: true
+      maxItems: 50
+      items: {type: string, minLength: 1, maxLength: 20}
+      description: A todo whose title contains one of these is homework; replaces the default list

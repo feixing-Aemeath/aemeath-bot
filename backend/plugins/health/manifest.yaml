@@ -1,0 +1,173 @@
+id: health
+name: 健康与睡眠
+version: 0.1.0
+icon: heart
+description: 按天汇总 iPhone/Apple Watch 健康数据，计算个人基线、睡眠规律、训练负荷和 0–10 分的综合准备度，生成晨间简报和周报；只描述趋势，不做诊断
+platforms: [any]
+permissions: []
+mascot: {sticker: lily_veil, accent: "#8068B2"}
+schedule: null
+provides: [mcp_tools, cards]
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    timezone:
+      type: string
+      minLength: 1
+      default: Asia/Shanghai
+      description: IANA time zone that splits days
+    source_priority:
+      type: array
+      items: {enum: [watch, phone, other]}
+      minItems: 3
+      maxItems: 3
+      uniqueItems: true
+      default: [watch, phone, other]
+    wear:
+      type: object
+      additionalProperties: false
+      properties:
+        min_hours: {type: integer, minimum: 1, maximum: 24, default: 12}
+    sleep:
+      type: object
+      additionalProperties: false
+      properties:
+        day_cutoff_hour: {type: integer, minimum: 12, maximum: 23, default: 18}
+        segment_gap_minutes: {type: integer, minimum: 1, maximum: 240, default: 30}
+        night_gap_minutes: {type: integer, minimum: 0, maximum: 480, default: 120}
+        min_minutes: {type: integer, minimum: 0, maximum: 720, default: 120}
+    baseline:
+      type: object
+      additionalProperties: false
+      properties:
+        min_days_7d: {type: integer, minimum: 1, maximum: 7, default: 4}
+        min_days_30d: {type: integer, minimum: 1, maximum: 30, default: 14}
+        notable_z: {type: number, minimum: 0.5, maximum: 10, default: 2}
+        strong_z: {type: number, minimum: 0.5, maximum: 20, default: 3}
+        mad_floors:
+          type: object
+          additionalProperties: false
+          properties:
+            resting_hr: {type: number, exclusiveMinimum: 0}
+            hrv_ln_sdnn: {type: number, exclusiveMinimum: 0}
+            hrv_ln_rmssd: {type: number, exclusiveMinimum: 0}
+            respiratory_rate: {type: number, exclusiveMinimum: 0}
+            oxygen_saturation: {type: number, exclusiveMinimum: 0}
+            wrist_temperature: {type: number, exclusiveMinimum: 0}
+            vo2max: {type: number, exclusiveMinimum: 0}
+            steps: {type: number, exclusiveMinimum: 0}
+            active_energy: {type: number, exclusiveMinimum: 0}
+            trimp: {type: number, exclusiveMinimum: 0}
+            sleep_minutes: {type: number, exclusiveMinimum: 0}
+            deep_minutes: {type: number, exclusiveMinimum: 0}
+            core_minutes: {type: number, exclusiveMinimum: 0}
+            rem_minutes: {type: number, exclusiveMinimum: 0}
+            awake_minutes: {type: number, exclusiveMinimum: 0}
+            sleep_onset: {type: number, exclusiveMinimum: 0}
+            wake_time: {type: number, exclusiveMinimum: 0}
+    sri:
+      type: object
+      additionalProperties: false
+      properties:
+        min_pairs_7d: {type: integer, minimum: 1, maximum: 6, default: 4}
+        min_pairs_30d: {type: integer, minimum: 1, maximum: 29, default: 14}
+    training:
+      type: object
+      additionalProperties: false
+      properties:
+        max_hr:
+          type: number
+          minimum: 100
+          maximum: 230
+          description: Measured maximum heart rate; default is the highest observed
+        resting_hr:
+          type: number
+          minimum: 30
+          maximum: 120
+          description: Fixed resting heart rate for TRIMP; default is the 30-day median
+        weighting:
+          enum: [male, female]
+          default: male
+          description: Banister TRIMP weighting curve
+    alerts:
+      type: array
+      maxItems: 50
+      description: Replaces the default rules when present
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, metric, direction]
+        properties:
+          id: {type: string, pattern: "^[a-z][a-z0-9_]{0,63}$"}
+          metric:
+            description: hrv means the preferred HRV measure of each day (RMSSD, else SDNN)
+            enum: [hrv, resting_hr, hrv_ln_sdnn, hrv_ln_rmssd, respiratory_rate,
+                   oxygen_saturation, wrist_temperature, vo2max, steps, active_energy,
+                   sleep_minutes, deep_minutes, core_minutes, rem_minutes, awake_minutes,
+                   sleep_onset, wake_time]
+          direction: {enum: [above, below, either]}
+          baseline: {enum: [7d, 30d], default: 30d}
+          z: {type: number, minimum: 0, maximum: 20, default: 2}
+          min_delta: {type: number, minimum: 0, default: 0}
+          days: {type: integer, minimum: 1, maximum: 30, default: 3}
+          enabled: {type: boolean, default: true}
+    readiness:
+      type: object
+      additionalProperties: false
+      description: 0-10 readiness from nightly HRV, resting HR, sleep and training load
+      properties:
+        weights:
+          type: object
+          additionalProperties: false
+          description: Normalized over the parts a day has; 0 leaves a part out
+          properties:
+            hrv: {type: number, minimum: 0, maximum: 10, default: 0.35}
+            resting_hr: {type: number, minimum: 0, maximum: 10, default: 0.2}
+            sleep: {type: number, minimum: 0, maximum: 10, default: 0.3}
+            training_load: {type: number, minimum: 0, maximum: 10, default: 0.15}
+        min_components: {type: integer, minimum: 1, maximum: 4, default: 2}
+        z_full:
+          type: number
+          minimum: -10
+          maximum: 10
+          default: 1
+          description: Favourable robust z that scores 10
+        z_zero:
+          type: number
+          minimum: -10
+          maximum: 10
+          default: -3
+          description: Unfavourable robust z that scores 0
+        sleep_target_hours: {type: number, minimum: 1, maximum: 14, default: 7}
+        sleep_zero_hours: {type: number, minimum: 0, maximum: 12, default: 3}
+        acwr_full: {type: number, minimum: 0, maximum: 5, default: 1}
+        acwr_zero: {type: number, minimum: 0, maximum: 5, default: 2}
+    reports:
+      type: object
+      additionalProperties: false
+      description: Morning briefing and weekly report written by the Agent from computed numbers
+      properties:
+        enabled: {type: boolean, default: true}
+        morning_earliest_hour:
+          type: integer
+          minimum: 0
+          maximum: 12
+          default: 4
+          description: First hour to check whether last night's sleep has been uploaded
+        morning_deadline_hour:
+          type: integer
+          minimum: 0
+          maximum: 14
+          default: 10
+          description: Generate the morning briefing at this hour even without sleep data
+        weekly_weekday: {enum: [mon, tue, wed, thu, fri, sat, sun], default: sun}
+        weekly_hour: {type: integer, minimum: 0, maximum: 23, default: 21}
+        goals_path:
+          type: string
+          minLength: 4
+          pattern: "\\.md$"
+          default: 健康/训练目标.md
+          description: Long-term memory note with training goals
+        max_attempts: {type: integer, minimum: 1, maximum: 5, default: 2}
+        max_rejections: {type: integer, minimum: 1, maximum: 10, default: 5}

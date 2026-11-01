@@ -1,0 +1,40 @@
+id: video_notes
+name: 视频
+version: 0.1.0
+icon: play.rectangle
+description: 夜间把公开视频的字幕、本地语音识别和幻灯片文字存入知识库
+platforms: [any]
+permissions: [network]
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: orange_daisy, accent: "#E57A3C"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    default_topic: {type: string, minLength: 1, maxLength: 40, default: 视频}
+    domains:
+      type: array
+      items: {type: string, minLength: 1}
+      uniqueItems: true
+      default: [bilibili.com, www.bilibili.com, m.bilibili.com, b23.tv, youtube.com, www.youtube.com, m.youtube.com, youtu.be]
+    process_cron: {type: string, default: "30 1 * * *"}
+    max_per_run: {type: integer, minimum: 1, maximum: 50, default: 5}
+    run_timeout_minutes: {type: integer, minimum: 1, maximum: 1440, default: 85}
+    max_duration_minutes: {type: integer, minimum: 1, maximum: 1440, default: 180}
+    subtitle_languages:
+      type: array
+      minItems: 1
+      maxItems: 20
+      items: {type: string, pattern: "^[A-Za-z0-9-]+$"}
+      default: [zh-Hans, zh-CN, zh, ai-zh, en]
+    slides: {type: boolean, default: true}
+    yt_dlp: {type: string, minLength: 1, default: yt-dlp}
+    ffmpeg: {type: string, minLength: 1, default: ffmpeg}
+    doc_text: {type: string, minLength: 1}
+    asr_command: {type: string, minLength: 1, default: mlx_whisper}
+    asr_model: {type: string, description: 已手动下载的 MLX Whisper 模型目录，不接受远程仓库名}
+    asr_chunk_seconds: {type: integer, minimum: 30, maximum: 1800, default: 600}
+    step_timeout: {type: integer, minimum: 1, maximum: 7200, default: 900}
+    disk_limit_gb: {type: number, exclusiveMinimum: 0, default: 10}
+    retry_delay_seconds: {type: number, minimum: 0, maximum: 300, default: 2}

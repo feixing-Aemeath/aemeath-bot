@@ -1,0 +1,1 @@
+{"agent_timeout":900,"confidence_threshold":0.7,"extraction_cron":"0 7-23\/3 * * *","harness_order":["claude_code","codex"],"job_harness":{},"retry_attempts":3,"retry_base_seconds":2,"source_cron":"*\/30 * * * *","timezone":"Asia\/Shanghai"}

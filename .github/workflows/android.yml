@@ -1,0 +1,59 @@
+name: Android
+on:
+  pull_request:
+    paths: ['android/**', '.github/workflows/android.yml']
+  push:
+    branches: [main, 'local/**']
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: SDK
+        # The runner ships the SDK (ANDROID_HOME). setup-android@v3 failed asking for the
+        # retired "tools" package, so call the SDK's own sdkmanager.
+        run: |
+          sdkmanager=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$sdkmanager" --licenses > /dev/null
+          "$sdkmanager" 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Check fixtures and resources
+        run: python3 scripts/check_sources.py
+      - name: Assemble and test core
+        run: gradle --no-daemon --stacktrace assembleDebug :core:test
+      - name: Test app and record UI screenshots (JVM, mock data)
+        # Record mode runs every app unit test as well as the screenshot cases.
+        run: gradle --no-daemon --stacktrace :app:recordRoborazziDebug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-ui-screenshots
+          if-no-files-found: error
+          path: |
+            android/app/build/outputs/roborazzi/
+            android/app/build/reports/roborazzi/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-debug-and-tests
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/**/build/reports/tests/
+            android/**/build/test-results/

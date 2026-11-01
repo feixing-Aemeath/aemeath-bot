@@ -1,0 +1,86 @@
+id: token_usage
+name: Token 余额与消耗
+version: 0.1.0
+icon: gauge.with.dots.needle.50percent
+description: 各个 Agent 的余额和总消耗：助手每次运行时 Claude Code、Codex 报告的 token 数，加上从本机会话记录读到的你自己用的部分
+platforms: [any]
+permissions: []
+mascot: {sticker: shouanren, accent: "#3E7FD6"}
+schedule: "0 * * * *"
+provides: [cards]
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    balances:
+      type: object
+      additionalProperties: false
+      description: 充值的余额；从 as_of 那天起减去每次运行的费用
+      properties:
+        claude_code: {$ref: "#/$defs/balance"}
+        codex: {$ref: "#/$defs/balance"}
+    low_balance_usd:
+      type: number
+      minimum: 0
+      default: 15
+      description: 余额低于这个数时在摘要里提醒
+    prices:
+      type: object
+      additionalProperties: false
+      description: 每百万 token 的美元单价，只用于 CLI 没有报告费用的运行（Codex）
+      properties:
+        claude_code: {$ref: "#/$defs/price"}
+        codex: {$ref: "#/$defs/price"}
+    manual_totals:
+      type: array
+      maxItems: 20
+      description: >-
+        自己填的累计 token 数，只计入「总共使用的 token」。给这里读不到的模型（比如 DeepSeek）；
+        name 是 Claude 或 GPT 时，代替 as_of 那天以前统计到的数（不填 as_of 就全部代替）
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, tokens]
+        properties:
+          name: {type: string, minLength: 1, maxLength: 40}
+          tokens: {type: integer, minimum: 0}
+          as_of: {type: string, format: date, pattern: "^\\d{4}-\\d{2}-\\d{2}$"}
+    read_limits:
+      type: boolean
+      default: true
+      description: >-
+        每 10 分钟读一次 Claude、Codex 的 5 小时和每周限额：Codex 问本机的 codex app-server；
+        Claude 用 Claude Code 登录后存在钥匙串里的令牌问 Anthropic（只发给 api.anthropic.com，不保存）
+    renew_claude_login:
+      type: boolean
+      default: true
+      description: >-
+        Claude Code 的登录过期时（不常用命令行版本时大约一天），自动运行一次最小的 claude 请求让它自己续上
+        （几个 token，最多半小时一次），再读限额
+    read_sessions:
+      type: boolean
+      default: true
+      description: 读本机 Claude Code、Codex 的会话记录，统计你自己用的部分；只读 token 数
+    session_dirs:
+      type: array
+      maxItems: 20
+      uniqueItems: true
+      items: {type: string, minLength: 1}
+      default: ["~/.claude/projects", "~/.codex/sessions"]
+      description: 会话记录所在的目录；另外总会读数据目录下的 token_usage/imports
+  $defs:
+    balance:
+      type: object
+      additionalProperties: false
+      required: [amount_usd, as_of]
+      properties:
+        amount_usd: {type: number, minimum: 0}
+        as_of: {type: string, format: date, pattern: "^\\d{4}-\\d{2}-\\d{2}$"}
+    price:
+      type: object
+      additionalProperties: false
+      required: [input, output]
+      properties:
+        input: {type: number, minimum: 0}
+        cached_input: {type: number, minimum: 0}
+        output: {type: number, minimum: 0}

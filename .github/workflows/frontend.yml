@@ -1,0 +1,65 @@
+name: Frontend
+
+# macOS minutes are expensive: only run when the App or this workflow changes, and only once
+# per change (pull requests, plus pushes to main after merging).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: XcodeGen + build iOS / watchOS / macOS + AssistantCore tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun simctl list runtimes || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: AssistantCore tests
+        run: swift test --package-path Packages/AssistantCore
+
+      # The iPhone App embeds the watch app and its complication, so this also builds both for
+      # the watchOS simulator; a separate watchOS build would compile the same code again.
+      - name: Build iOS with the embedded watch app (simulator, no signing)
+        run: >
+          xcodebuild build -quiet -project Assistant.xcodeproj -scheme Assistant-iOS
+          -destination "generic/platform=iOS Simulator" -derivedDataPath DerivedData
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: Check the watch app is inside the iPhone App
+        run: scripts/check-watch-embed.sh DerivedData/Build/Products/Debug-iphonesimulator/Assistant-iOS.app
+
+      - name: Build macOS (no signing)
+        run: >
+          xcodebuild build -quiet -project Assistant.xcodeproj -scheme Assistant-macOS
+          -destination "generic/platform=macOS"
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO

@@ -1,0 +1,20 @@
+id: campus
+name: 请假与学校活动
+version: 0.1.0
+icon: calendar
+description: 请假记录和审批进度，以及讲座、比赛、报名这类学校活动；Agent 读消息时记下，也可以在对话里告诉它
+platforms: [any]
+permissions: []
+schedule: null
+provides: [mcp_tools, cards]
+mascot: {sticker: luosela, accent: "#5B43C9"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    past_days:
+      type: integer
+      minimum: 0
+      maximum: 60
+      default: 3
+      description: Keep showing an activity this many days after it ended

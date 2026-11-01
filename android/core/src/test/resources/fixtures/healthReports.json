@@ -1,0 +1,9 @@
+{"items": [{"id": "r1", "date": "2026-10-15", "kind": "morning", "status": "ready",
+   "title": "睡得不错，今天可以正常训练",
+   "body": "昨晚睡了 **7小时12分**，比 7 天基线多 18 分钟。\n\n- 静息心率 58\n- 建议：正常训练",
+   "error": null, "harness": "claude_code",
+   "created_at": "2026-10-15T19:05:45.160741Z", "updated_at": "2026-10-15T19:05:45.160752Z"},
+  {"id": "r2", "date": "2026-10-14", "kind": "morning", "status": "failed", "title": null,
+   "body": null, "error": "report_not_written", "harness": null,
+   "created_at": "2026-10-15T19:05:45.162977Z", "updated_at": "2026-10-15T19:05:45.162991Z"}],
+ "total": 2}

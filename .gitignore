@@ -1,0 +1,8 @@
+# Apple Health exports contain real health data; never commit them anywhere in the repo.
+export.zip
+export.xml
+export_cda.xml
+apple_health_export/
+导出.zip
+导出.xml
+导出_cda.xml

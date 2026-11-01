@@ -1,0 +1,19 @@
+id: goodnotes
+name: GoodNotes 备份
+version: 0.1.0
+icon: book.closed
+description: 将 WebDAV 的 PDF 备份安全复制到对应知识库主题。
+platforms: [any]
+permissions: []
+schedule: null
+provides: []
+mascot: {sticker: orange_daisy, accent: "#E57A3C"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    cron: {type: string, default: '*/15 * * * *'}
+    settle_seconds: {type: integer, minimum: 120, default: 120}
+    mapping:
+      type: object
+      additionalProperties: {type: string, minLength: 1, maxLength: 40}

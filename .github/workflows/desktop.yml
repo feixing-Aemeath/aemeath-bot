@@ -1,0 +1,83 @@
+name: Windows Desktop
+
+on:
+  pull_request:
+    paths: ['desktop/**', 'android/core/**', '.github/workflows/desktop.yml']
+  push:
+    branches: [main, 'local/**']
+    paths: ['desktop/**', 'android/core/**', '.github/workflows/desktop.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Check sources and shared assets
+        run: python3 scripts/check_sources.py
+      - name: Compile desktop and run JVM tests
+        run: gradle --no-daemon --stacktrace test :core:test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-tests
+          path: |
+            desktop/build/reports/tests/
+            desktop/build/test-results/
+            android/core/build/reports/tests/
+            android/core/build/test-results/
+
+  package:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: WiX 3 for JDK 17 jpackage
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin\candle.exe")) {
+            choco install wixtoolset --version=3.14.1 --yes --no-progress --allow-downgrade
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin" >> $env:GITHUB_PATH
+      - name: Package MSI with bundled runtime
+        run: gradle --no-daemon --stacktrace packageMsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aemeath-Bot-Windows-MSI
+          if-no-files-found: error
+          path: desktop/build/compose/binaries/main/msi/*.msi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: jpackage-logs
+          path: desktop/build/compose/logs/

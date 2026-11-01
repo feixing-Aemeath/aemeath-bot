@@ -1,0 +1,25 @@
+.venv/
+.cache/
+.tools/
+.state/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.build/
+*.db
+*.db-*
+*.log
+# Apple Health exports (real health data) stay local
+export.zip
+export.xml
+export_cda.xml
+apple_health_export/
+导出.zip
+导出.xml
+导出_cda.xml

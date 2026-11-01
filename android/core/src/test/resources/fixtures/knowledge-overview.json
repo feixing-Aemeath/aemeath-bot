@@ -1,0 +1,18 @@
+{
+  "readers": [
+    {"id": "助理", "kind": "bot", "sticker": "aemeath"},
+    {"id": "作业", "kind": "bot", "sticker": "moning"},
+    {"id": "Claude Code", "kind": "agent", "sticker": null}
+  ],
+  "default_readers": ["助理"],
+  "areas": [
+    {"path": "知识库/课程", "name": "课程", "kind": "topic", "readers": ["助理", "Claude Code"],
+     "locked": [], "notes": 12, "sources": 5, "files": 17, "pending": 1, "failed": 0,
+     "updated_at": "2026-10-29T03:10:00+08:00"},
+    {"path": "Bots", "name": "Bots", "kind": "system", "readers": ["助理", "作业"],
+     "locked": ["助理", "作业"], "notes": 0, "sources": 0, "files": 13, "pending": 0, "failed": 0,
+     "updated_at": null}
+  ],
+  "loose_files": 2,
+  "organize": {"last_run_at": "2026-10-29T03:00:05.123456+08:00", "status": "succeeded", "next_run_at": null}
+}
