@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -51,7 +52,7 @@ async def screen(service, identifier="qq_screen"):
         PluginPatch(
             enabled=True,
             config={
-                "helper": "/fake/screen-helper",
+                "helper": str(Path("/fake/screen-helper").resolve()),
                 "whitelist": ["实验室", "读书会"],
                 "open_on_demand": ["实验室"],
                 "preview_only": True,

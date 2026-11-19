@@ -366,7 +366,7 @@ def test_console_probe_separates_active_user_lock_login_and_background_sessions(
 
 @pytest.mark.parametrize("output", [b"not plist", b"", plistlib.dumps([]), plistlib.dumps(["bad"])])
 def test_unreadable_console_is_unknown_instead_of_locked(output):
-    assert console_state(output).code is None
+    assert console_state(output, uid=501).code is None
 
 
 @pytest.mark.parametrize(
