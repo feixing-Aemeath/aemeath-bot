@@ -1,6 +1,6 @@
 [project]
 name = "assistant-backend"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first 24 hour assistant backend"
 requires-python = ">=3.12"
 dependencies = [

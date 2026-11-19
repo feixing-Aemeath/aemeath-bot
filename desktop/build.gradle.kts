@@ -13,7 +13,7 @@ plugins {
     id("org.jetbrains.compose") version "1.9.1"
 }
 
-version = "1.0.0"
+version = "1.1.0"
 kotlin {
     jvmToolchain(17)
 }
@@ -90,7 +90,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "Aemeath Bot"
-            packageVersion = "1.0.0"
+            packageVersion = "1.1.0"
             // ASCII only: WiX builds the MSI in code page 1252, where Chinese fails the package.
             description = "Aemeath Bot desktop assistant"
             vendor = "Aemeath"
