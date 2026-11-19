@@ -51,6 +51,8 @@ targets:
     info:
       path: Generated/iOS-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Aemeath Bot
         UILaunchScreen: {}
         AssistantAppGroup: group.$(BUNDLE_ID_PREFIX)
@@ -115,6 +117,8 @@ targets:
     info:
       path: Generated/macOS-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Aemeath Bot
         LSApplicationCategoryType: public.app-category.productivity
         # The backend on this Mac (127.0.0.1) or over Tailscale; tailscale serve gives HTTPS.
@@ -152,6 +156,8 @@ targets:
     info:
       path: Generated/watchOS-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Aemeath Bot
         WKApplication: true
         WKCompanionAppBundleIdentifier: $(BUNDLE_ID_PREFIX).ios
@@ -192,6 +198,8 @@ targets:
     info:
       path: Generated/watchWidget-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Aemeath Bot
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
@@ -220,6 +228,8 @@ targets:
     info:
       path: Generated/phoneWidget-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: 此刻与待办
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
@@ -248,6 +258,8 @@ targets:
     info:
       path: Generated/share-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: 转给助理
         AssistantAppGroup: group.$(BUNDLE_ID_PREFIX)
         AssistantSharedKeychainGroup: $(AppIdentifierPrefix)$(BUNDLE_ID_PREFIX).share-token
