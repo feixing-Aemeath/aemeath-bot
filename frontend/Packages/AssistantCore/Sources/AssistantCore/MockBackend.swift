@@ -11,10 +11,15 @@ public actor MockBackend: Backend {
     private var pluginItems: [PluginView]
     private var pluginCards: [String: [Card]]
     private var reports: [HealthReport]
+    private var preferences = BotPreferenceSnapshot(version: 0, entries: [:])
     private var runtime: RuntimeSettings
     private var online: Bool
     private var chats: [String: [ChatMessage]] = [:]
     private var library: MockKnowledge
+    private var inboxItems: [(item: InboxItem, id: String, date: Date, processed: Bool)] = []
+    private var missedDates: [Date] = []
+    private var rejectedDates: [Date] = []
+    private var openedChats: [String: Date] = [:]
     private var nextID = 100
     private var uploadedIDs: Set<String> = []
     private let clock: @Sendable () -> Date
@@ -24,6 +29,8 @@ public actor MockBackend: Backend {
     public static let jobDuration: TimeInterval = 4
     /// How long a Bot takes to answer in chat.
     public static let replyDelay: TimeInterval = 2
+    /// As many chat lines as `LiveBackend` reads at a time.
+    public static let chatPageSize = 100
     public static let replyText =
         "（模拟数据里的示例回复）连上 Mac 上的后端以后，我会查你的待办和记录来回答，也能帮你记待办。"
 
@@ -35,9 +42,18 @@ public actor MockBackend: Backend {
         todoItems = scenario.todos
         digestItems = scenario.digests
         runItems = scenario.runs
-        pluginItems = scenario.plugins
+        var configuredPlugins = scenario.plugins
+        for index in configuredPlugins.indices where ["qq_screen", "wechat_screen"].contains(configuredPlugins[index].id) {
+            let pluginID = configuredPlugins[index].id
+            let names = Array(Set(scenario.todos.flatMap { $0.sources ?? [] }.filter { $0.plugin == pluginID }.map(\.chatName))).sorted()
+            configuredPlugins[index].configSchema = .object(["properties": .object(["preview_only": .object(["type": .string("boolean")]), "whitelist": .object(["type": .string("array")])])])
+            configuredPlugins[index].config = .object(["whitelist": .array(names.map(JSONValue.string)),
+                "open_on_demand": .array(names.map(JSONValue.string)), "preview_only": .bool(true)])
+        }
+        pluginItems = configuredPlugins
         pluginCards = scenario.cards
         reports = scenario.reports
+        chats = scenario.chats
         runtime = scenario.settings
         library = MockKnowledge(now: now)
         self.online = online
@@ -47,6 +63,19 @@ public actor MockBackend: Backend {
 
     func check() throws {
         guard online else { throw APIError.transport("offline (mock)") }
+    }
+
+    public func botPreferences() throws -> BotPreferenceSnapshot {
+        try check()
+        return preferences
+    }
+
+    public func updateBotPreferences(_ entries: [String: BotPreferences.Entry], expectedVersion: Int) throws -> BotPreferenceSnapshot {
+        try check()
+        guard expectedVersion == preferences.version else { throw APIError.conflict }
+        guard entries.count <= 100 else { throw APIError.invalidRequest }
+        preferences = BotPreferenceSnapshot(version: preferences.version + 1, entries: entries)
+        return preferences
     }
 
     public func setOnline(_ value: Bool) {
@@ -87,15 +116,31 @@ public actor MockBackend: Backend {
         .sorted { ($0.dueAt ?? now) < ($1.dueAt ?? now) }
         return Today(
             date: DueText.format(now, "yyyy-MM-dd", calendar),
-            summary: "班级群有 2 条截止通知，实验室提醒年度材料明天截止，今天没有新的健康预警。",
+            // As the backend's /today: the message sources' digests of today, merged by section.
+            summary: "**新待办**\n- 实验室：年度材料，明天 18:00\n- 班级群：学生信息核对，今天 17:00\n"
+                + "- 班级群：篮球赛报名，周五前\n\n**通知**\n- 实验室：周会改到周四下午\n"
+                + "- 宿舍楼通知群：下周三停水检修\n\n**还不确定**\n- 数据结构课程群：作业提醒，预览，没看到全文"
+                + digestItems.filter { $0.plugin == "share" && $0.date == DueText.format(now, "yyyy-MM-dd", calendar) }.map { "\n\n" + $0.summary }.joined(),
             todos: due,
             // Every running plugin's cards, as the backend's /today.
-            cards: pluginItems.filter { $0.state == .enabled }.flatMap { pluginCards[$0.id] ?? [] })
+            cards: pluginItems.filter { $0.state == .enabled }.flatMap { marked($0.id) },
+            unsure: mockUnsure(now: now))
+    }
+
+    /// A plugin's cards, each naming it, as the backend gives them.
+    func marked(_ pluginID: String) -> [Card] {
+        (pluginCards[pluginID] ?? []).map { card in
+            var card = card
+            card.plugin = pluginID
+            return card
+        }
     }
 
     public func todos(status: TodoStatus?) async throws -> [Todo] {
         try check()
-        return todoItems.filter { status == nil ? $0.status != .deleted : $0.status == status }
+        return todoItems.filter {
+            status == nil ? $0.status != .deleted && $0.status != .cancelled : $0.status == status
+        }
     }
 
     public func updateTodo(id: String, _ patch: TodoPatch) async throws -> Todo {
@@ -117,6 +162,8 @@ public actor MockBackend: Backend {
         if let hasTime = patch.hasTime { todo.hasTime = hasTime }
         if todo.hasTime && todo.dueAt == nil { throw APIError.invalidRequest }
         if let status = patch.status { todo.status = status }
+        if todo.status != todoItems[index].status, [.deleted, .cancelled].contains(todo.status),
+           patch.reason == .notATodo, todo.createdBy != "user" { rejectedDates.append(clock()) }
         if todo.status == .deleted {
             todo.reminderID = nil
             todo.calendarEventID = nil
@@ -140,6 +187,14 @@ public actor MockBackend: Backend {
             if now >= end {
                 runItems[index].status = .succeeded
                 runItems[index].finishedAt = end
+            }
+        }
+        for index in inboxItems.indices where !inboxItems[index].processed {
+            let entry = inboxItems[index]
+            if runItems.contains(where: { $0.job == "extract_todos" && $0.status == .succeeded && ($0.finishedAt ?? .distantPast) >= entry.date }) {
+                inboxItems[index].processed = true
+                digestItems.append(Digest(id: "inbox-digest-\(entry.id)", date: DueText.format(now, "yyyy-MM-dd", calendar),
+                    plugin: "share", summary: "**通知**\n- " + String(entry.item.text.prefix(200)), createdAt: now))
             }
         }
         return runItems.sorted { $0.startedAt > $1.startedAt }
@@ -171,6 +226,7 @@ public actor MockBackend: Backend {
     /// Accepts samples like the backend: the same ID twice counts as a duplicate.
     public func uploadHealth(_ batch: HealthBatch) async throws -> HealthAccepted {
         try check()
+        uploadedIDs.subtract(batch.deleted)
         let fresh = batch.samples.filter { !uploadedIDs.contains($0.id) }
         uploadedIDs.formUnion(fresh.map(\.id))
         return HealthAccepted(accepted: fresh.count, duplicates: batch.samples.count - fresh.count)
@@ -198,7 +254,7 @@ public actor MockBackend: Backend {
         guard let plugin = pluginItems.first(where: { $0.id == pluginID }) else {
             throw APIError.notFound
         }
-        return plugin.state == .enabled ? pluginCards[pluginID] ?? [] : []
+        return plugin.state == .enabled ? marked(pluginID) : []
     }
 
     public func healthReports() async throws -> [HealthReport] {
@@ -228,7 +284,14 @@ public actor MockBackend: Backend {
         return runtime
     }
 
-    public func chat(botID: String) async throws -> [ChatMessage] {
+    public func succeeded(job: String, since: Date, until: Date) async throws -> RunCount {
+        let found = try await runs().filter {
+            $0.job == job && $0.status == .succeeded && $0.startedAt >= since && $0.startedAt < until
+        }
+        return RunCount(total: found.count, latest: found.first)
+    }
+
+    public func chat(botID: String, before: String?) async throws -> ChatHistory {
         try check()
         let now = clock()
         // A reply is written `replyDelay` after the question.
@@ -242,7 +305,12 @@ public actor MockBackend: Backend {
             line.updatedAt = line.createdAt.addingTimeInterval(Self.replyDelay)
             return line
         }
-        return chats[botID] ?? []
+        // The cursor is the index of the page's first line.
+        let lines = chats[botID] ?? []
+        let end = before.flatMap(Int.init) ?? lines.count
+        let start = max(0, end - Self.chatPageSize)
+        return ChatHistory(
+            items: Array(lines[start..<end]), nextBefore: start > 0 ? String(start) : nil)
     }
 
     public func sendChat(botID: String, text: String, botName: String?, choice: ChatChoice) async throws
@@ -255,7 +323,8 @@ public actor MockBackend: Backend {
         guard isBot else { throw APIError.notFound }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 2000 else { throw APIError.invalidRequest }
-        let current = try await chat(botID: botID)
+        _ = try await chat(botID: botID, before: nil)  // writes the replies that are due
+        let current = chats[botID] ?? []
         if current.contains(where: { $0.status == .pending }) { throw APIError.conflict }
         let now = clock()
         nextID += 2
@@ -267,6 +336,99 @@ public actor MockBackend: Backend {
             createdAt: now, updatedAt: now)
         chats[botID] = current + [line, reply]
         return ChatAccepted(message: line, reply: reply)
+    }
+
+    public func createTodo(_ request: TodoNew) async throws -> TodoCreated {
+        try check()
+        guard request.isValid else { throw APIError.invalidRequest }
+        let title = request.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existing = todoItems.first(where: {
+            $0.status == .pending && $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == title.lowercased() && $0.dueAt == request.dueAt
+        }) { return TodoCreated(todo: existing, duplicate: true) }
+        nextID += 1
+        let todo = Todo(id: "manual-\(nextID)", title: title, notes: request.notes, dueAt: request.dueAt,
+            hasTime: request.hasTime, sourcePlugin: "app", reminderID: "reminder-\(nextID)",
+            createdBy: "user", createdAt: clock(), updatedAt: clock())
+        todoItems.append(todo)
+        if request.missed { missedDates.append(clock()) }
+        return TodoCreated(todo: todo, duplicate: false)
+    }
+
+    public func submitInbox(_ item: InboxItem) async throws -> InboxAccepted {
+        try check()
+        guard item.isValid else { throw APIError.invalidRequest }
+        if let old = inboxItems.last(where: { $0.item.text == item.text && clock().timeIntervalSince($0.date) < 600 }) {
+            return InboxAccepted(messageID: old.id, jobStarted: false)
+        }
+        nextID += 1
+        let id = "inbox-\(nextID)"
+        inboxItems.append((item, id, clock(), false))
+        if item.missed { missedDates.append(clock()) }
+        do { _ = try await runJob("extract_todos"); return InboxAccepted(messageID: id, jobStarted: true) }
+        catch APIError.conflict { return InboxAccepted(messageID: id, jobStarted: false) }
+    }
+
+    public func todoSources(id: String) async throws -> TodoSourceTexts {
+        try check()
+        guard let todo = todoItems.first(where: { $0.id == id }) else { throw APIError.notFound }
+        return TodoSourceTexts(items: (todo.sources ?? []).map {
+            TodoSourceTextItem(messageID: $0.messageID, plugin: $0.plugin, chatName: $0.chatName,
+                sender: $0.sender, sentAt: $0.sentAt, text: todo.sourceExcerpt)
+        })
+    }
+
+    func mockUnsure(now: Date) -> [UnsureItem] {
+        guard let source = ManualEntryText.conversations(pluginItems).first(where: { $0.plugin == "qq_screen" }) else { return [] }
+        let key = source.plugin + ":" + source.chatName
+        if let opened = openedChats[key], calendar.isDate(opened, inSameDayAs: now), now.timeIntervalSince(opened) >= Self.jobDuration { return [] }
+        return [UnsureItem(id: "mock-unsure-" + DueText.format(now, "yyyy-MM-dd", calendar),
+            text: source.chatName + "：消息只有预览，还没看到全文", plugin: source.plugin, chatName: source.chatName,
+            canOpen: !openedChats.values.contains { calendar.isDate($0, inSameDayAs: now) })]
+    }
+
+    public func openChat(pluginID: String, chatName: String) async throws -> OpenChatAccepted {
+        try check()
+        guard let plugin = pluginItems.first(where: { $0.id == pluginID }), PluginConfigEdit.hasPreviewMode(plugin) else { throw APIError.notFound }
+        guard PluginConfigEdit.names(plugin, "whitelist").contains(chatName) else { throw APIError.screenOpen("screen_open_not_whitelisted") }
+        guard PluginConfigEdit.names(plugin, "open_on_demand").contains(chatName) else { throw APIError.screenOpen("screen_open_not_allowed") }
+        let key = pluginID + ":" + chatName
+        if let opened = openedChats[key], calendar.isDate(opened, inSameDayAs: clock()) { throw APIError.screenOpen("screen_open_daily_limit") }
+        do {
+            _ = try await runJob("fetch:" + pluginID)
+            openedChats[key] = clock()
+            return OpenChatAccepted(accepted: true, jobStarted: true)
+        } catch APIError.conflict {
+            openedChats[key] = clock()
+            return OpenChatAccepted(accepted: true, jobStarted: false)
+        }
+    }
+
+    public func extractionStats(weeks: Int) async throws -> ExtractionStats {
+        try check()
+        guard (1...26).contains(weeks) else { throw APIError.invalidRequest }
+        var monday = calendar
+        monday.firstWeekday = 2; monday.minimumDaysInFirstWeek = 4
+        let start = monday.dateInterval(of: .weekOfYear, for: clock())!.start
+        return ExtractionStats(weeks: (0..<weeks).map { offset in
+            let day = monday.date(byAdding: .weekOfYear, value: -offset, to: start)!
+            let end = monday.date(byAdding: .day, value: 7, to: day)!
+            let sources = Set(pluginItems.filter { $0.provides.contains("source") }.map(\.id)).union(["share", "chat"])
+            let caught = todoItems.filter {
+                $0.createdBy != "user" && $0.createdAt >= day && $0.createdAt < end
+                    && $0.sourcePlugin.split(separator: ",").contains { sources.contains(String($0)) }
+            }
+            let missed = missedDates.filter { $0 >= day && $0 < end }.count
+            let lead = caught.compactMap { todo -> Double? in
+                guard let due = todo.dueAt, due >= todo.createdAt else { return nil }
+                return due.timeIntervalSince(todo.createdAt) / 3600
+            }.sorted()
+            let median: Double? = lead.isEmpty ? nil : (lead[(lead.count - 1) / 2] + lead[lead.count / 2]) / 2
+            return ExtractionWeek(weekStart: DueText.format(day, "yyyy-MM-dd", monday), caught: caught.count,
+                withDue: caught.filter { $0.dueAt != nil }.count,
+                late: caught.filter { ($0.dueAt ?? .distantFuture) < $0.createdAt }.count,
+                medianLeadHours: median, missed: missed, notATodo: rejectedDates.filter { $0 >= day && $0 < end }.count,
+                recall: caught.count + missed == 0 ? nil : Double(caught.count) / Double(caught.count + missed))
+        })
     }
 
     public func knowledge() async throws -> KnowledgeOverview {
@@ -325,6 +487,8 @@ struct MockScenario {
     var plugins: [PluginView] = []
     var cards: [String: [Card]] = [:]
     var reports: [HealthReport] = []
+    /// A conversation with 健康Bot, so a chat with a table shows before anything is sent.
+    var chats: [String: [ChatMessage]] = [:]
     var settings: RuntimeSettings
 
     init(now: Date, calendar: Calendar) {
@@ -391,17 +555,17 @@ struct MockScenario {
         digests = [
             Digest(
                 id: "d1", date: date(0), plugin: "qq_screen",
-                summary: "班级群：学生信息核对今天 17:00 截止（已建待办）；周五篮球赛报名（已建待办）。\n"
-                    + "宿舍楼通知群：下周三停水检修（纯通知）。\n"
-                    + "（预览）数据结构课程群：作业提醒，内容被截断，等读到完整消息再判断。",
+                summary: "**新待办**\n- 班级群：学生信息核对，今天 17:00\n- 班级群：篮球赛报名，周五前\n\n"
+                    + "**通知**\n- 宿舍楼通知群：下周三停水检修\n\n"
+                    + "**还不确定**\n- 数据结构课程群：作业提醒，预览，没看到全文",
                 createdAt: ago(7)),
             Digest(
                 id: "d2", date: date(0), plugin: "feishu",
-                summary: "实验室：年度材料明天 18:00 前提交（已建待办）；周会改到周四下午（纯通知）。",
+                summary: "**新待办**\n- 实验室：年度材料，明天 18:00\n\n**通知**\n- 实验室：周会改到周四下午",
                 createdAt: ago(30)),
             Digest(
                 id: "d3", date: date(-1), plugin: "qq_screen",
-                summary: "宿舍楼通知群：卫生评比材料今天中午前补交（已建待办）。\n班级群：讲座宣传两条（纯通知）。",
+                summary: "**新待办**\n- 宿舍楼通知群：补交卫生评比材料，今天 12:00\n\n**通知**\n- 班级群：两场讲座宣传",
                 createdAt: ago(1490)),
             Digest(
                 id: "d4", date: date(0), plugin: "health",
@@ -756,8 +920,9 @@ struct MockScenario {
                 type: .text, title: "今日提醒",
                 data: .object([
                     "text": .string(
-                        "早上好！今天上海多云，9–21°C，不用带伞；早晚凉，穿件外套。\n\n"
-                            + "- 08:00 大学英语（1）\n- 17:00 前在学工系统完成学生信息核对")
+                        "**天气** 多云，9–21°C\n- 外套或卫衣：早晚体感 7°C\n- 注意防晒：紫外线指数 7\n\n"
+                            + "**课程** 今天 1 节课\n- 08:00–09:35 大学英语（1）\n\n"
+                            + "**待办** 今天截止 2 件\n- 17:00 学生信息核对\n- 交数据结构第三次作业\n- 逾期：补交寝室卫生评比材料")
                 ])),
             Card(
                 type: .stat, title: "上海今天",
@@ -843,6 +1008,54 @@ struct MockScenario {
                 body: "本周平均睡眠 **7小时03分**，入睡时间波动 25 分钟。\n\n"
                     + "- 训练 3 次，总时长 2小时40分\n- 静息心率稳定\n\n下周建议保持现在的作息。",
                 harness: "codex", createdAt: ago(5760), updatedAt: ago(5760)),
+        ]
+
+        // 30 days drawn for a reply (a token_usage preset), as the backend keeps it.
+        let month = (0..<30).map { offset -> CardChart.Point in
+            let day = calendar.date(byAdding: .day, value: offset - 29, to: today) ?? today
+            let parts = calendar.dateComponents([.month, .day], from: day)
+            return CardChart.Point(x: "\(parts.month ?? 1)/\(parts.day ?? 1)", y: Double(120 + (offset * 37) % 110))
+        }
+        chats = [
+            "token_usage": [
+                ChatMessage(
+                    id: "mock-token-1", botID: "token_usage", author: .me, text: "最近一个月用了多少？",
+                    status: .ready, createdAt: ago(30), updatedAt: ago(30)),
+                ChatMessage(
+                    id: "mock-token-2", botID: "token_usage", author: .bot,
+                    text: "最近 30 天一共约 **5.1M** tokens，平均每天 170k，这周比上周多一点。",
+                    status: .ready, createdAt: ago(29), updatedAt: ago(29),
+                    cards: [
+                        Card(
+                            type: .chart, title: "最近 30 天消耗",
+                            data: .object([
+                                "kind": .string("line"), "unit": .string("千 tokens"),
+                                "points": .array(month.map { .object(["x": .string($0.x), "y": .number($0.y)]) }),
+                            ]),
+                            plugin: "token_usage", takenAt: ago(29))
+                    ]),
+            ],
+            "health": [
+                ChatMessage(
+                    id: "mock-health-1", botID: "health", author: .me, text: "这几天睡得怎么样？",
+                    status: .ready, createdAt: ago(42), updatedAt: ago(42)),
+                ChatMessage(
+                    id: "mock-health-2", botID: "health", author: .bot,
+                    text: "这三晚都在 7 小时左右，周二最短：\n\n"
+                        + "| 日期 | 睡眠 | 深睡 | 入睡 |\n|:--|--:|--:|:-:|\n"
+                        + "| 周一 | 7小时05分 | 1小时18分 | 23:40 |\n"
+                        + "| 周二 | 6小时20分 | 58分 | 00:35 |\n"
+                        + "| 周三 | 7小时12分 | 1小时24分 | 23:20 |\n\n"
+                        + "周二晚睡了近一小时，深睡也少一些。今晚 23:30 前睡下就好。",
+                    status: .ready, createdAt: ago(41), updatedAt: ago(41),
+                    // Attached as they were then, as the backend keeps them.
+                    cards: healthCards.filter { ["昨晚睡眠", "最近 7 晚睡眠分期"].contains($0.title) }.map { card in
+                        var card = card
+                        card.plugin = "health"
+                        card.takenAt = ago(41)
+                        return card
+                    }),
+            ]
         ]
 
         settings = RuntimeSettings(

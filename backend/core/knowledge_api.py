@@ -179,15 +179,7 @@ def router(service):
                 "description": "原文件（PDF 最多 500 MiB，其他格式 50 MiB）",
                 "content": {
                     mime: {"schema": {"type": "string", "format": "binary"}}
-                    for mime in (
-                        "application/pdf",
-                        "image/png",
-                        "image/jpeg",
-                        "image/heic",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        "text/markdown",
-                        "text/plain",
-                    )
+                    for mime in BINARY_MEDIA
                 },
             }
         },

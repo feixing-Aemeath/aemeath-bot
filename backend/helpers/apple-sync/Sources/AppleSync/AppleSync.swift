@@ -14,10 +14,21 @@ struct Input: Decodable {
     let calendar: String?
     let end_at: String?
     let timezone: String?
+    let require_existing: Bool?
+    let expected_modified_at: String?
 }
 
-struct Output: Encodable { let id: String? }
-enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidDate }
+struct Output: Encodable {
+    let id: String?
+    let list_id: String?
+    let last_modified_at: String?
+}
+struct ReadInput: Decodable {
+    let reminder_ids: [String]
+    let client_ids: [String]?
+    let timezone: String?
+}
+enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidDate, readFailed, changed }
 
 @main struct AppleSync {
     static let store = EKEventStore()
@@ -110,6 +121,84 @@ enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidD
         store.calendars(for: entity).filter { $0.title == name }
     }
 
+    static func requireReminderAccess() throws {
+        let state = EKEventStore.authorizationStatus(for: .reminder)
+        let granted: Bool
+        if #available(macOS 14.0, *) { granted = state == .fullAccess }
+        else { granted = state == .authorized }
+        guard granted else { throw SyncError.denied }
+    }
+
+    /// One read across all dedicated lists, including completed items. Never asks for access
+    /// or creates a list; an unavailable fetch must not look like an empty, readable list.
+    static func readReminders(_ input: ReadInput) async throws -> [String: Any] {
+        guard !input.reminder_ids.isEmpty,
+              input.reminder_ids.allSatisfy({ !$0.isEmpty }),
+              input.client_ids == nil || input.client_ids?.count == input.reminder_ids.count
+        else { throw SyncError.invalidInput }
+        try requireReminderAccess()
+        let all = lists(.reminder)
+        guard !all.isEmpty else { throw SyncError.calendarUnavailable }
+        let fetched: [EKReminder]? = await withCheckedContinuation { continuation in
+            store.fetchReminders(matching: store.predicateForReminders(in: all)) {
+                continuation.resume(returning: $0)
+            }
+        }
+        guard let fetched else { throw SyncError.readFailed }
+        try requireReminderAccess()
+        let listIDs = Set(all.map { $0.calendarIdentifier })
+        guard listIDs == Set(lists(.reminder).map { $0.calendarIdentifier }) else {
+            throw SyncError.calendarUnavailable
+        }
+        var local = Calendar.current
+        if let name = input.timezone {
+            guard let zone = TimeZone(identifier: name) else { throw SyncError.invalidInput }
+            local.timeZone = zone
+        }
+        let format = ISO8601DateFormatter()
+        func timestamp(_ date: Date?) -> Any {
+            date.map { format.string(from: $0) } as Any? ?? NSNull()
+        }
+        format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var found: [String: EKReminder] = [:]
+        let requested = Set(input.reminder_ids)
+        for item in fetched where requested.contains(item.calendarItemIdentifier) {
+            found[item.calendarItemIdentifier] = item
+        }
+        // A saved ID can still exist after the user moves it out of our lists. Report its
+        // location so the backend holds it; it must not become a false deletion.
+        for identifier in requested where found[identifier] == nil {
+            if let item = store.calendarItem(withIdentifier: identifier) as? EKReminder {
+                found[identifier] = item
+            }
+        }
+        // Apple can give a reminder a new ID on a full sync; the marker written with it stays.
+        var moved: [String: EKReminder] = [:]
+        for (identifier, client) in zip(input.reminder_ids, input.client_ids ?? [])
+        where found[identifier] == nil {
+            let marker = URL(string: "assistant-todo://" + client)
+            if let item = fetched.first(where: { $0.url == marker }) { moved[identifier] = item }
+        }
+        let items: [[String: Any]] = input.reminder_ids.map { identifier in
+            guard let item = found[identifier] ?? moved[identifier] else {
+                return ["id": identifier, "current_id": NSNull(), "exists": false, "list_id": NSNull(),
+                        "completed": NSNull(), "completed_at": NSNull(), "title": NSNull(),
+                        "due_at": NSNull(), "has_time": NSNull(), "last_modified_at": NSNull()]
+            }
+            let due = item.dueDateComponents
+            let hasTime = due?.hour != nil || due?.minute != nil || due?.second != nil
+            var dueCalendar = due?.calendar ?? local
+            dueCalendar.timeZone = due?.timeZone ?? local.timeZone
+            return ["id": identifier,
+                    "current_id": moved[identifier].map { $0.calendarItemIdentifier as Any } ?? NSNull(),
+                    "exists": true, "list_id": item.calendar.calendarIdentifier,
+                    "completed": item.isCompleted, "completed_at": timestamp(item.completionDate),
+                    "title": item.title ?? "", "due_at": timestamp(due.flatMap { dueCalendar.date(from: $0) }),
+                    "has_time": hasTime, "last_modified_at": timestamp(item.lastModifiedDate)]
+        }
+        return ["list_ids": listIDs.sorted(), "items": items]
+    }
+
     static func localCalendar(_ input: Input) throws -> Calendar {
         var calendar = Calendar.current
         if let name = input.timezone {
@@ -135,6 +224,16 @@ enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidD
         if delete {
             for item in matches { try store.remove(item, commit: true) }
             return nil
+        }
+        if input.require_existing == true {
+            guard let existing = matches.first(where: { $0.calendarItemIdentifier == input.id }) else {
+                throw SyncError.changed
+            }
+            if let expected = try date(input.expected_modified_at) {
+                // It went out as milliseconds and came back parsed: not the same Double.
+                guard let modified = existing.lastModifiedDate,
+                      abs(modified.timeIntervalSince(expected)) < 0.002 else { throw SyncError.changed }
+            }
         }
         let list = try calendar(.reminder)
         let local = try localCalendar(input)
@@ -263,6 +362,12 @@ enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidD
         do {
             guard CommandLine.arguments.count == 3 else { throw SyncError.invalidInput }
             let resource = CommandLine.arguments[1], action = CommandLine.arguments[2]
+            if resource == "reminders" && action == "read" {
+                let input = try JSONDecoder().decode(ReadInput.self, from: FileHandle.standardInput.readDataToEndOfFile())
+                let result = try await readReminders(input)
+                FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]))
+                return
+            }
             guard ["reminders", "calendar"].contains(resource), ["upsert", "delete"].contains(action) else {
                 throw SyncError.invalidInput
             }
@@ -280,11 +385,27 @@ enum SyncError: Error { case invalidInput, denied, calendarUnavailable, invalidD
                 try await access(.event)
                 identifier = try event(input, delete: action == "delete")
             }
-            let data = try JSONEncoder().encode(Output(id: identifier))
+            let listID = resource == "reminders" ? identifier.flatMap {
+                store.calendarItem(withIdentifier: $0)?.calendar.calendarIdentifier
+            } : nil
+            let format = ISO8601DateFormatter()
+            format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let modified = identifier.flatMap { store.calendarItem(withIdentifier: $0)?.lastModifiedDate }
+            let data = try JSONEncoder().encode(Output(
+                id: identifier, list_id: listID, last_modified_at: modified.map { format.string(from: $0) }
+            ))
             // JSONEncoder omits nil by default; protocol requires an explicit null.
             FileHandle.standardOutput.write(identifier == nil ? Data("{\"id\":null}\n".utf8) : data)
         } catch {
-            FileHandle.standardError.write(Data("apple_sync_failed\n".utf8))
+            var code = "apple_sync_failed"
+            if CommandLine.arguments.dropFirst() == ["reminders", "read"] {
+                switch error {
+                case SyncError.denied: code = "apple_reminders_denied"
+                case SyncError.calendarUnavailable: code = "apple_reminders_list_unavailable"
+                default: code = "apple_reminders_read_failed"
+                }
+            }
+            FileHandle.standardError.write(Data("\(code)\n".utf8))
             exit(1)
         }
     }

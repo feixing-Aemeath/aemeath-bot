@@ -28,6 +28,9 @@
                     link("消息来源", "bubble.left.and.bubble.right", detail: "\(sources.count) 个") {
                         SourcesPage(sources: sources, open: openBot)
                     }
+                    #if os(iOS)
+                        link("通知", "bell", detail: nil) { NotificationSettingsPage() }
+                    #endif
                     #if os(iOS) && canImport(HealthKit)
                         if UIDevice.current.userInterfaceIdiom != .pad {
                             link("健康数据", "heart.text.square", detail: HealthSync.shared.asked ? "已开启" : "未开启") {
@@ -47,9 +50,11 @@
                         }
                         .settingsPage("运行时间表")
                     }
+                    link("对账", "checkmark.rectangle", detail: nil) { ExtractionStatsPage() }
                     link("运行记录", "list.bullet.rectangle", detail: nil) {
                         RunsPage()
                     }
+                    link("仪表盘", "square.grid.2x2", detail: nil) { DashboardSettings() }
                     link("卡片风格", "paintpalette", detail: cardStyle.name) {
                         CardStylePage()
                     }
@@ -160,6 +165,28 @@
         }
     }
 
+    /// A plugin's sticker as a round face, zoomed on the face like the Bots' avatars.
+    struct PluginFace: View {
+        let plugin: PluginView
+
+        var body: some View {
+            GeometryReader { proxy in
+                let side = min(proxy.size.width, proxy.size.height)
+                let look = StickerLook(plugin: plugin)
+                let name = look.resolved(in: .main)
+                let place = FacePlacement.avatar(name, side: side)
+                StickerImage(name: name)
+                    .frame(width: place.drawn, height: place.drawn)
+                    .position(place.center)
+                    .frame(width: side, height: side)
+                    .background(look.accent.color.opacity(0.15))
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(look.accent.color.opacity(0.4), lineWidth: 1))
+            }
+            .aspectRatio(1, contentMode: .fit)
+        }
+    }
+
     /// Every plugin with its sticker and how it is doing; each opens its own page.
     struct PluginsPage: View {
         @EnvironmentObject private var store: AppStore
@@ -175,8 +202,7 @@
                     } label: {
                         HStack(spacing: 10) {
                             // Still: animating inside list rows re-lays out the whole list.
-                            StickerImage(name: StickerLook(plugin: plugin).resolved(in: .main))
-                                .frame(width: 30, height: 30)
+                            PluginFace(plugin: plugin).frame(width: 32, height: 32)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(plugin.name)
                                 Text(store.statusLine(plugin))
@@ -185,7 +211,7 @@
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 0)
-                            StatusDot(color: plugin.state.color)
+                            if let color = plugin.state.dotColor { StatusDot(color: color) }
                         }
                     }
                 }
@@ -258,7 +284,7 @@
                                 BotAvatar(bot: bot, state: store.botState(bot))
                                     .frame(width: 34, height: 34)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(bot.name).foregroundStyle(.primary)
+                                    Text(store.displayName(bot)).foregroundStyle(.primary)
                                     Text(bot.intro).font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 0)

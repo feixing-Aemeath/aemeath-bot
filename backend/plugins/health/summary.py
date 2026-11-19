@@ -209,7 +209,11 @@ class Analyzer:
 
     def training(self, day, hr_max):
         daily = {
-            d: (row["metrics"].get("trimp", {}).get("value") if row else None)
+            d: (
+                row["metrics"]["trimp"].get("value")
+                if row and row["metrics"].get("trimp", {}).get("quality") == "ok"
+                else None
+            )
             for d, row in self.rows.items()
         }
         load = training_load(daily, day, min(self.rows) if self.rows else None)

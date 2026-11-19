@@ -122,6 +122,17 @@ def test_daily_totals_are_used_alone_and_midnight_samples_are_split():
     assert cumulative_total([crossing], *next_day, PRIORITY)[0] == pytest.approx(100)
 
 
+def test_instant_cumulative_duplicates_count_once():
+    day = at("2026-10-12 00:00"), at("2026-10-13 00:00")
+    samples = [
+        obs("step_count", "2026-10-12 10:00", value=100),
+        obs("step_count", "2026-10-12 10:00", value=100, origin="upload"),
+        obs("step_count", "2026-10-12 10:00", value=100, source=PHONE, device="phone"),
+        obs("step_count", "2026-10-12 11:00", value=50),
+    ]
+    assert cumulative_total(samples, *day, PRIORITY) == (150, {"watch"})
+
+
 def test_workout_written_by_watch_and_third_party_app_is_kept_once():
     watch = obs("workout", "2026-10-12 18:00", "2026-10-12 18:40", 40, "Running")
     strava = obs(

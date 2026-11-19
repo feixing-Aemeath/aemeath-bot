@@ -16,7 +16,7 @@ from core.knowledge_access import safe_path
 from core.platforms import is_link
 from core.prompts import render
 from core.store import ConflictError
-from core.tokens import MAIN, Grant, current_grant
+from core.tokens import MAIN, current_grant, task_grant
 
 # Agent runs per topic in one organize job; each takes up to 8 sources.
 BATCHES = 6
@@ -321,12 +321,19 @@ class Knowledge:
             raise ValueError("raw only supports knowledge files")
         if path.stat().st_size > file_limit(path):
             raise ValueError("文件超过格式允许的大小")
-        # Fixed here, not left to mimetypes: on Windows it reads the registry, and a machine
-        # without Office calls a .docx application/octet-stream.
+        # Fixed here, not left to mimetypes: on Windows it reads the registry, so a machine
+        # without Office calls a .docx application/octet-stream, one with Office calls a .csv
+        # application/vnd.ms-excel, and a .zip is application/x-zip-compressed.
         types = {
             ".md": "text/markdown",
             ".txt": "text/plain",
+            ".csv": "text/csv",
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
             ".heic": "image/heic",
+            ".zip": "application/zip",
             ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -520,7 +527,13 @@ class Knowledge:
             return False
         run_name = "knowledge:" + os.urandom(12).hex()
         self.receipts[run_name] = {}
-        grant = Grant(None, run_name, frozenset({"mcp"}), kind="organizer", area=area["path"])
+        grant = task_grant(
+            run_name,
+            kind="organizer",
+            area=area["path"],
+            tools={"memory_search", "memory_read", "knowledge_note_write"},
+            memory_read_paths={area["path"] + "/"},
+        )
         prompt = render(
             "knowledge_organize",
             topic=area["path"],

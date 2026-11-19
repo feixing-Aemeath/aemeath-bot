@@ -1,7 +1,11 @@
+import asyncio
+import os
+import signal
 import sys
 
 import pytest
 
+from core import helper_process
 from core.config import Settings, safe_bind
 from harness.base import CLIHarness, classify
 from harness.claude_code import ClaudeCodeHarness
@@ -99,3 +103,115 @@ async def test_harness_real_subprocess_and_timeout(tmp_path):
     assert (await harness.run("", {"environment": {}}, 0.1)).error == "timeout"
     harness.code = 'print(\'{"result":"ok"}\')'
     assert (await harness.run("", {"environment": {}}, 10)).success
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("exited", [False, True])
+async def test_timeout_cleans_the_group_after_the_cli_exits(tmp_path, monkeypatch, exited):
+    killed = []
+
+    class Process:
+        pid = 12345
+        returncode = 0 if exited else None
+
+        async def communicate(self, _data):
+            raise TimeoutError
+
+        async def wait(self):
+            return 0
+
+    async def spawn(*_args, **_kwargs):
+        return Process()
+
+    def killpg(pid, sig):
+        killed.append((pid, sig))
+        if not exited:
+            raise ProcessLookupError
+
+    class Stub(CLIHarness):
+        executable = sys.executable
+
+        def command(self, _config):
+            return [self.executable]
+
+    monkeypatch.setattr(helper_process, "start", spawn)
+    monkeypatch.setattr(helper_process, "WINDOWS", False)
+    monkeypatch.setattr(helper_process.os, "killpg", killpg, raising=False)
+    result = await Stub(tmp_path).run("", {"environment": {}}, 1)
+    assert result.error == "timeout"
+    assert killed == [(12345, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize(
+    "harness_class,events",
+    [
+        (ClaudeCodeHarness, [{"type": "system", "subtype": "init"}]),
+        (CodexHarness, [{"type": "thread.started"}, {"type": "turn.started"}]),
+        (CodexHarness, [{"type": "turn.completed"}, {"type": "turn.started"}]),
+    ],
+)
+async def test_cli_zero_exit_without_a_complete_result_fails(tmp_path, harness_class, events):
+    from tests.test_token_usage import printing
+
+    result = await printing(harness_class, tmp_path, events).run("", {"environment": {}}, 10)
+    assert not result.success and result.error == "agent_incomplete"
+
+
+@pytest.mark.parametrize(
+    "output", ["usage_limit_reached", "Insufficient Balance", "You've hit your limit"]
+)
+def test_quota_error_variants_are_classified(output):
+    assert classify(output) == "quota_exhausted"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+async def test_timeout_kills_mcp_child_even_after_cli_parent_exits(tmp_path):
+    marker, pid_file = tmp_path / "survived", tmp_path / "child.pid"
+    child = f"import time; from pathlib import Path; time.sleep(0.5); Path({str(marker)!r}).touch()"
+    parent = (
+        "import subprocess,sys; from pathlib import Path; "
+        f"p=subprocess.Popen([sys.executable,'-c',{child!r}]); "
+        f"Path({str(pid_file)!r}).write_text(str(p.pid))"
+    )
+
+    class Stub(CLIHarness):
+        executable = sys.executable
+
+        def command(self, mcp_config):
+            return [sys.executable, "-c", parent]
+
+    try:
+        result = await Stub(tmp_path).run("", {"environment": {}}, 0.2)
+        assert result.error == "timeout"
+        assert pid_file.is_file()
+        await asyncio.sleep(0.7)
+        assert not marker.exists(), "stdio MCP child survived the timed-out run"
+    finally:
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+async def test_cli_environment_contains_only_its_run_scoped_assistant_settings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ASSISTANT_TOKEN", "synthetic-master")
+    monkeypatch.setenv("ASSISTANT_DEEPSEEK_API_KEY", "synthetic-other-provider")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "synthetic-source")
+    script = (
+        "import os,sys; "
+        "sys.exit(0 if os.environ.get('ASSISTANT_TOKEN') == 'synthetic-run' "
+        "and 'ASSISTANT_DEEPSEEK_API_KEY' not in os.environ "
+        "and 'FEISHU_APP_SECRET' not in os.environ else 1)"
+    )
+
+    class Stub(CLIHarness):
+        executable = sys.executable
+
+        def command(self, _config):
+            return [self.executable, "-c", script]
+
+    result = await Stub(tmp_path).run("", {"environment": {"ASSISTANT_TOKEN": "synthetic-run"}}, 5)
+    assert result.success

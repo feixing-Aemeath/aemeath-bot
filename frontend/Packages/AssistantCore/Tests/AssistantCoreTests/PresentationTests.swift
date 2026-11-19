@@ -36,6 +36,13 @@ final class PresentationTests: XCTestCase {
             state: state, error: error)
     }
 
+    func testDashboardShowsTheSameSourceCountAsTheSwitches() {
+        var broken = plugin("notes", .error)
+        broken.enabled = true
+        let inputs = [broken, plugin("video", .enabled), plugin("photos", .disabled), plugin("mail", .disabled)]
+        XCTAssertEqual(DashboardEdit.sourceSummary(inputs), "2 个来源启用，2 个停用")
+    }
+
     func testPluginConfigEditKeepsTheRestOfTheConfiguration() {
         var qq = plugin("qq_screen", .enabled)
         qq.configSchema = .object([
@@ -157,23 +164,33 @@ final class PresentationTests: XCTestCase {
         func line(_ plugin: PluginView) -> String {
             PluginStatusLine.describe(plugin, runs: runs, todos: todos, now: now, calendar: calendar)
         }
-        XCTAssertEqual(line(plugin("qq_screen", .enabled)), "上次运行在 9 分钟前，提取了 2 条待办")
-        XCTAssertEqual(line(plugin("feishu", .enabled)), "上次运行在 2 小时前，读取飞书消息失败")
-        XCTAssertEqual(line(plugin("wechat_screen", .enabled)), "还没有运行过")
+        XCTAssertEqual(line(plugin("qq_screen", .enabled)), "9 分钟前读过消息，记下 2 条待办")
+        XCTAssertEqual(line(plugin("feishu", .enabled)), "2 小时前没读成：读取飞书消息失败")
+        XCTAssertEqual(line(plugin("wechat_screen", .enabled)), "还没有读过消息")
         XCTAssertEqual(line(plugin("wechat_screen", .disabled)), "已停用")
         XCTAssertEqual(line(plugin("photos", .unsupported)), "这台电脑上不能运行")
         XCTAssertEqual(line(plugin("feishu", .error, error: "plugin_setup_failed")), "出错：插件启动失败")
+        // A character keeps something up to date; it does not read messages.
+        var health = plugin("health", .enabled)
+        health.provides = ["cards"]
         let busy = [run("plugin:health:morning_report", .running, started: "2026-10-15T20:58:15+08:00", seconds: nil)]
         XCTAssertEqual(
-            PluginStatusLine.describe(plugin("health", .enabled), runs: busy, todos: [], now: now, calendar: calendar),
-            "正在运行，已经 1 分 45 秒")
+            PluginStatusLine.describe(health, runs: busy, todos: [], now: now, calendar: calendar),
+            "正在更新，已经 1 分 45 秒")
         // A plugin that is not a message source has no todos extracted from it.
         var grades = plugin("grades", .enabled)
         grades.provides = ["cards"]
         let synced = [run("plugin:grades:sync", .succeeded, started: "2026-10-15T20:00:00+08:00")]
         XCTAssertEqual(
             PluginStatusLine.describe(grades, runs: synced, todos: todos, now: now, calendar: calendar),
-            "上次运行在 59 分钟前")
+            "59 分钟前更新过")
+        // One the Agent fills while reading has no jobs of its own: no record yet, not 「还没有运行过」.
+        XCTAssertEqual(
+            PluginStatusLine.describe(grades, runs: [], todos: todos, now: now, calendar: calendar), "还没有记录")
+        let failed = [run("plugin:grades:sync", .failed, started: "2026-10-15T20:00:00+08:00", error: "job_failed")]
+        XCTAssertTrue(
+            PluginStatusLine.describe(grades, runs: failed, todos: [], now: now, calendar: calendar)
+                .hasPrefix("59 分钟前没更新成："))
     }
 
     func testKnowledgeStatusLine() {
@@ -311,5 +328,24 @@ final class AgentTextTests: XCTestCase {
             status: .failed, error: "quota_exhausted", attempt: 1)
         XCTAssertEqual(
             AgentText.lastRun(run, now: now, calendar: calendar), "最近一次：提炼待办 · 失败 · 3 分钟前 · 额度用完")
+    }
+
+    func testShortStatus() {
+        let calendar = DueText.calendar(timeZone: TimeZone(identifier: "Asia/Shanghai")!)
+        let now = APIDateCoding.date(from: "2026-10-15T21:00:00+08:00")!
+        let failed = Run(
+            id: "f", job: "extract_todos", harness: "codex", startedAt: now.addingTimeInterval(-120),
+            finishedAt: now.addingTimeInterval(-100), status: .failed, error: "quota_exhausted", attempt: 1)
+        let fine = Run(
+            id: "s", job: "extract_todos", harness: "claude_code", startedAt: now.addingTimeInterval(-600),
+            finishedAt: now.addingTimeInterval(-540), status: .succeeded, error: nil, attempt: 1)
+        func status(_ state: MascotState, _ last: Run?, _ success: Run?) -> String {
+            AgentText.status(state, lastRun: last, lastSuccess: success, now: now, calendar: calendar)
+        }
+        XCTAssertEqual(status(.idle, fine, fine), "空闲 · 9 分钟前提炼过")
+        XCTAssertEqual(status(.idle, nil, nil), "空闲 · 还没有提炼过")
+        XCTAssertEqual(status(.error, failed, fine), "上次提炼失败 · 额度用完")
+        XCTAssertEqual(status(.working, fine, fine), "正在提炼待办")
+        XCTAssertEqual(status(.offline, fine, fine), "连不上 Mac")
     }
 }

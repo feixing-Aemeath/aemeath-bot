@@ -105,9 +105,11 @@ PDF 提取与原文件预览允许到 **500 MiB**，其他格式仍为 50 MiB；
 
 通过当前启用的课表实例调用 `timetable_days`，只匹配 kind=`课程`，包含课前 5 分钟和课后 10 分钟的两个端点。重叠窗口优先选实际上课时段，再选离开课时间最近的一节。推测周也采用，同时保存 `estimated_from`；完全未知的日期没有候选课。没有启用课表时记录失败并保留游标。课程名先去掉末尾 `（推测）` / `(推测)`，再应用跳过列表与主题映射。
 
-未落入课程窗口、或被跳过的课，只读 ID、创建时间和图片类型等元数据，不导出、不做 OCR。候选图片导出到数据目录暂存，用 Documents 做本机 OCR；不足门槛（含零字）记「不像课件」，丢掉暂存原图。提取器不可用等技术失败保留窗口等待重试，同时继续处理后续照片，不因单张失败挡住其他图片。当前使用 Documents 支持的 PNG/JPG/JPEG/HEIC；其他图片格式或超过 50 MiB 的图片记 unreadable、丢弃暂存，不阻塞后续导入。达到门槛后新建 `知识库/<主题>/课堂照片/<YYYY-MM-DD>/<HHMM>-<id前8位>.<原扩展名>`（文件名中的非安全 ID 字符改成 `_`）；现有同名文件保留，内部记录 conflict。主题首次出现固定默认读者。暂存副本在处理完成/失败后清理；启动时清理这个插件自己留下的 `photo-*` 暂存目录。
+未落入课程窗口、或被跳过的课，只读 ID、创建时间和图片类型等元数据，不导出、不做 OCR。候选图片导出到数据目录暂存，用 Documents 做本机 OCR；不足门槛（含零字）记「不像课件」，丢掉暂存原图。提取器不可用等技术失败保留窗口等待重试，同时继续处理后续照片，不因单张失败挡住其他图片。当前使用 Documents 支持的 PNG/JPG/JPEG/HEIC；其他图片格式或超过 50 MiB 的图片记 unreadable、丢弃暂存，不阻塞后续导入。达到门槛后新建 `知识库/<主题>/课堂照片/<YYYY-MM-DD>/<HHMM>-<id前8位>-<完整ID的SHA256前16位>.<原扩展名>`（文件名中的非安全 ID 字符改成 `_`），避免同一分钟、相同 ID 前缀的照片互相冲突；现有同名文件保留，内部记录 conflict。已有入库记录和文件名保留。主题首次出现固定默认读者。暂存副本在处理完成/失败后清理；启动时清理这个插件自己留下的 `photo-*` 暂存目录。
 
 SQLite 的 `class_photos_files` 按完整 PhotoKit ID 保存处理结果、拍摄日期、课程、主题、推测来源和目标。已入库、判为非课件、跳过或冲突的 ID 不再导出；用户删掉知识库照片也不会恢复。OCR 的文字门槛只是启发式，有足够文字的私人照片也可能被误判，课表推测也可能有误；可用 skip_courses 限制范围。
+
+若进程在保存导入意图后中断，下次扫描遇到同一 ID 时，目标尚不存在的会重新导入；目标已存在或路径变成符号链接的保守记为 conflict，保留文件，避免覆盖中断后用户的修改。
 
 `photo-export` 独立签名并以自身责任进程运行，权限归给它，不归 Python。PhotoKit 的 [PHAccessLevel](https://developer.apple.com/documentation/photos/phaccesslevel) 只有 addOnly / readWrite，读取必须请求名为 readWrite 的级别，没有独立 readOnly；工具没有任何照片库写入调用，也没有 AddUsageDescription。limited 表示只能读用户选中的照片，可能漏课件；authorized 才有全库读取范围。status/list/export 都不会主动申请权限，只有 authorize 会弹窗。工具允许原件从 [iCloud 下载](https://developer.apple.com/documentation/photos/phassetresourcerequestoptions/isnetworkaccessallowed)，单次导出超时 120 秒并取消请求。不会建相册、改收藏或删除照片。
 

@@ -82,7 +82,9 @@ fun main(arguments: Array<String>) = application {
             }
         }
         DesktopTheme {
-            CompositionLocalProvider(LocalAnimationActive provides mainVisible) { DesktopApp(store, state) }
+            CompositionLocalProvider(LocalAnimationActive provides mainVisible) {
+                DesktopApp(store, state, visible = mainVisible && !mainState.isMinimized)
+            }
         }
     }
     if (popupVisible) {
@@ -117,7 +119,7 @@ fun main(arguments: Array<String>) = application {
                         Mascot(assistant.look.sticker, mascotState, Modifier.size(64.dp))
                         Column {
                             Serif(trayText.headline, 18)
-                            Muted(if (state.online) mascotState.headline else "连不上 Mac")
+                            Muted(if (state.online) mascotState.headline else "连不上后端")
                         }
                     }
                     Divider(color = LocalPalette.current.hairline)

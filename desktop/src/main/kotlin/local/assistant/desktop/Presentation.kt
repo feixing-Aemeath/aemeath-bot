@@ -40,7 +40,7 @@ data class TrayText(val remaining: Int, val headline: String, val tooltip: Strin
         fun from(today: Today?, online: Boolean, state: MascotState): TrayText {
             val remaining = today?.todos.orEmpty().count { it.status == "pending" }
             val headline = "今日剩余 $remaining 件待办"
-            val status = if (online) state.headline else "连不上 Mac"
+            val status = if (online) state.headline else "连不上后端"
             return TrayText(remaining, headline, "Aemeath Bot · $headline · $status")
         }
     }
@@ -58,7 +58,7 @@ object RefreshPolicy {
 data class SettingsLink(val id: String, val title: String, val detail: String = "")
 
 fun settingsLinks(mock: Boolean, online: Boolean, plugins: List<PluginView>): List<SettingsLink> = listOf(
-    SettingsLink("connection", "连接", if (mock) "模拟数据" else if (online) "Mac 在线" else "连不上"),
+    SettingsLink("connection", "连接", if (mock) "模拟数据" else if (online) "后端在线" else "连不上"),
     SettingsLink("plugins", "插件", "${plugins.count { it.enabled }} 个已启用"),
     SettingsLink("sources", "消息来源", "${plugins.count { "source" in it.provides }} 个"),
     SettingsLink("schedule", "运行时间表"),

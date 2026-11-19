@@ -24,6 +24,7 @@ data class AppState(
     val reports: List<HealthReport> = emptyList(),
     val cards: Map<String, List<Card>> = emptyMap(),
     val chats: Map<String, List<ChatMessage>> = emptyMap(),
+    val chatTotals: Map<String, Int> = emptyMap(),
     val settings: RuntimeSettings? = null,
     val error: String? = null,
     val revision: Long = 0,
@@ -33,6 +34,7 @@ data class AppState(
 class AppModel @JvmOverloads constructor(
     application: Application,
     initialBackend: Backend? = null,
+    private val backendFactory: (() -> Backend)? = null,
     private val now: () -> Instant = { Instant.now() }
 ) : AndroidViewModel(application) {
     val device = DeviceSettings(application)
@@ -77,7 +79,7 @@ class AppModel @JvmOverloads constructor(
     }
 
     fun start() {
-        if (polling != null) return
+        if (polling?.isActive == true) return
         polling = viewModelScope.launch {
             // Refresh relative labels and expire the three-second completion pose without more HTTP calls.
             launch {
@@ -104,16 +106,25 @@ class AppModel @JvmOverloads constructor(
         val api = backend
         val epoch = generation
         val revision = mutable.value.revision
+        val previousReports = mutable.value.reports
         mutable.update { it.copy(loading = true) }
         try {
             val loaded = coroutineScope {
                 val status = async { api.status() }
                 val today = async { api.today() }
-                val todos = async { api.todos().items }
+                val todos = async { api.allTodos() }
                 val digests = async { api.digests().items }
                 val runs = async { api.runs().items }
                 val plugins = async { api.plugins() }
-                val reports = async { api.healthReports().items }
+                val reports = async {
+                    try {
+                        api.healthReports().items
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        previousReports
+                    }
+                }
                 val settings = async { api.settings() }
                 AppState(
                     status = status.await(),
@@ -137,6 +148,7 @@ class AppModel @JvmOverloads constructor(
                     settled = true,
                     cards = it.cards,
                     chats = it.chats,
+                    chatTotals = it.chatTotals,
                     error = it.error,
                     revision = it.revision + 1,
                     clock = now()
@@ -151,6 +163,7 @@ class AppModel @JvmOverloads constructor(
                 }.joinAll()
             }
         } catch (e: CancellationException) {
+            if (epoch == generation) mutable.update { it.copy(loading = false) }
             throw e
         } catch (_: Exception) {
             if (epoch == generation) mutable.update { it.copy(online = false, loading = false, settled = true) }
@@ -179,21 +192,33 @@ class AppModel @JvmOverloads constructor(
         if (bot.kind != BotKind.SOURCE) loadChat(id)
     }
 
-    suspend fun loadChat(id: String) {
+    private suspend fun fetchChat(id: String, api: Backend, epoch: Int, earlier: Boolean = false): List<ChatMessage> {
+        val offset = if (earlier) mutable.value.chats[id].orEmpty().size else 0
+        val page = api.chat(id, offset)
+        if (page.items.isEmpty() && offset < page.total) throw APIError("decoding")
+        if (epoch != generation) return emptyList()
+        mutable.update { current ->
+            current.copy(
+                chats = current.chats + (id to BotTimeline.mergeChat(current.chats[id].orEmpty(), page.items)),
+                chatTotals = current.chatTotals + (id to page.total)
+            )
+        }
+        return mutable.value.chats[id].orEmpty()
+    }
+
+    suspend fun loadChat(id: String, earlier: Boolean = false) {
         val epoch = generation
         val api = backend
         try {
-            val rows = api.chat(id).items.asReversed()
+            val rows = fetchChat(id, api, epoch, earlier)
             if (epoch != generation) return
-            mutable.update { it.copy(chats = it.chats + (id to rows)) }
             if (rows.any { it.status == "pending" } && chatPolls[id]?.isActive != true) chatPolls[id] =
                 viewModelScope.launch {
                     try {
                         repeat(600) {
                             delay(1500)
-                            val next = api.chat(id).items.asReversed()
+                            val next = fetchChat(id, api, epoch)
                             if (epoch != generation) return@launch
-                            mutable.update { it.copy(chats = it.chats + (id to next)) }
                             if (next.none { it.status == "pending" }) {
                                 refresh()
                                 return@launch
@@ -207,7 +232,9 @@ class AppModel @JvmOverloads constructor(
                 }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            if (earlier && epoch == generation) error("读取更早的消息失败，请检查连接")
+        }
     }
 
     suspend fun perform(label: String, action: suspend () -> Unit): Boolean = try {
@@ -252,11 +279,11 @@ class AppModel @JvmOverloads constructor(
             mutable.update { s ->
                 s.copy(
                     revision = s.revision + 1,
-                    todos = s.todos.map { if (it.id == updated.id) updated else it },
+                    todos = s.todos.map { if (it.id == updated.id) updated else it }.filter { it.visible },
                     today = s.today?.let { t ->
                         t.copy(
                             todos = t.todos.map { if (it.id == updated.id) updated else it }.filter {
-                                it.status != "deleted"
+                                it.visible
                             }
                         )
                     },
@@ -267,7 +294,7 @@ class AppModel @JvmOverloads constructor(
                                     c.data.obj() + ("todos" to Wire.encodeToJsonElement(
                                         (c.content as? CardContent.Todos)?.todos.orEmpty()
                                             .map { if (it.id == updated.id) updated else it }
-                                            .filter { it.status != "deleted" }
+                                            .filter { it.visible }
                                     ))
                                 )
                             ) else c
@@ -327,11 +354,15 @@ class AppModel @JvmOverloads constructor(
             generation++
             device.baseUrl = url.trim()
             device.mock = mock
-            backend = device.backend()
+            backend = backendFactory?.invoke() ?: device.backend()
             device.resetHealthCursors()
             mutable.value = AppState()
-            refresh()
-            start()
+            val epoch = generation
+            // Saving belongs to the model: leaving the screen must not cancel its first refresh.
+            viewModelScope.async {
+                refresh()
+                if (epoch == generation) start()
+            }.await()
         }
     }
 

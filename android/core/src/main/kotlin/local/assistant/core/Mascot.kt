@@ -12,11 +12,11 @@ enum class MascotState {
 
     val headline
         get() = when (this) {
-            IDLE -> "Mac 在线，空闲中"
+            IDLE -> "后端在线，空闲中"
             WORKING -> "正在运行"
             DONE -> "刚刚完成"
             ERROR -> "上次运行失败"
-            OFFLINE -> "连不上 Mac"
+            OFFLINE -> "连不上后端"
         }
 
     companion object {

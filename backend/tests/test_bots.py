@@ -22,13 +22,13 @@ def test_characters_follow_manifest_stickers_and_exclude_sources():
         elif name:
             mapped[name].append(manifest["id"])
     assert {name: sorted(plugins) for name, plugins in mapped.items()} == {
-        "助理": ["weather", "weekly_review"],
+        "助理": ["goals", "weather", "weekly_review"],
         "成绩": ["grades"],
         "校园": ["campus"],
         "作业": ["homework", "timetable"],
         "用量": ["token_usage"],
         "健康": ["health"],
-        "知识库": ["class_photos", "goodnotes", "video_notes"],
+        "知识库": ["class_photos", "goodnotes", "project_progress", "video_notes"],
         "记账": ["finance"],
     }
     assert character("assistant") == "助理"

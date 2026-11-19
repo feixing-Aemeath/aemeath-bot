@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 
 from core.plugins import Plugin as BasePlugin
 from core.prompts import render
-from core.tokens import Grant, current_grant
-from plugins.finance.cards import cards
+from core.tokens import current_grant, task_grant
+from plugins.finance.cards import cards, month_chart, months_chart
 from plugins.finance.config import PRIVATE, FinanceError, validate, yuan
 from plugins.finance.importing import Importer
 from plugins.finance.ledger import Ledger
@@ -18,7 +18,6 @@ class Plugin(BasePlugin):
     async def setup(self, context, config):
         await super().setup(context, config)
         validate(config)
-        self.zone = ZoneInfo(context.store.settings.timezone)
         self.ledger = Ledger(context.store.db, config, self.zone)
         self.importer = Importer(context, config, self.ledger)
         self.reports = Reports(self.importer, self.ledger)
@@ -30,6 +29,10 @@ class Plugin(BasePlugin):
             pass  # Remain available for the error card, state and doctor; all writes refuse.
         # The home and family-pays rules may have changed with the configuration.
         self.ledger.refresh_reimburse(self.now().isoformat())
+
+    @property
+    def zone(self):
+        return ZoneInfo(self.context.store.settings.timezone)
 
     def now(self):
         return datetime.now(self.zone)
@@ -94,6 +97,7 @@ class Plugin(BasePlugin):
         async with self.lock:
             if self.stopped:
                 raise FinanceError("finance_stopped")
+            self.ledger.zone = self.zone
             task = asyncio.create_task(asyncio.to_thread(method, *args))
             try:
                 return await asyncio.shield(task)
@@ -235,6 +239,7 @@ class Plugin(BasePlugin):
             arguments.get("id"),
             arguments.get("category"),
             arguments.get("remember", True),
+            self.now().isoformat(),
         )
 
     async def finance_reimburse(self, arguments):
@@ -350,8 +355,14 @@ class Plugin(BasePlugin):
                 render("finance_report", start=str(start)),
                 succeeded=lambda: self.reports.row(start)["status"] == "ready",
                 incomplete_error="finance_report_not_written",
-                grant=Grant(
-                    None, "财务汇总月报", frozenset({"mcp"}), kind="finance_report", area=str(start)
+                grant=task_grant(
+                    "财务汇总月报",
+                    kind="finance_report",
+                    area=str(start),
+                    plugin_tools={
+                        ("finance", "finance_report_input"),
+                        ("finance", "finance_report_write"),
+                    },
                 ),
             )
         except Exception:
@@ -390,13 +401,62 @@ class Plugin(BasePlugin):
     def _cards(self):
         return cards(self.ledger, self.now().date())
 
+    def charts(self):
+        """Charts 记账Bot can draw into a chat reply (the core lets no other Bot attach them),
+        from the same ledger as the cards; nothing in them goes to a model."""
+        return {
+            "monthly": {
+                "title": "每月花销",
+                "description": "柱状图：最近几个月每月花了多少，和生活费比（只算账单完整的月份）",
+                "params": {
+                    "months": {
+                        "type": "integer",
+                        "minimum": 2,
+                        "maximum": 12,
+                        "default": 6,
+                        "description": "看最近几个月（含这个月）",
+                    }
+                },
+                "build": self.months_chart,
+            },
+            "categories": {
+                "title": "某个月的钱花在哪儿",
+                "description": "环形图：那个月各类别花了多少",
+                "params": {
+                    "months_ago": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 11,
+                        "default": 0,
+                        "description": "0 是这个月，1 是上个月，依此类推",
+                    }
+                },
+                "build": self.month_chart,
+            },
+        }
+
+    async def months_chart(self, values):
+        if self.state_error():
+            return None
+        return await self.work(
+            lambda: months_chart(self.ledger, self.now().date(), values["months"])
+        )
+
+    async def month_chart(self, values):
+        if self.state_error():
+            return None
+        return await self.work(
+            lambda: month_chart(self.ledger, self.now().date(), values["months_ago"])
+        )
+
     async def daily(self, day):
         def note():
             self.importer.ensure()
             activity = [
                 r
                 for r in self.ledger.rows()
-                if datetime.fromisoformat(r["created_at"]).astimezone(self.zone).date() == day
+                if r["source"] != "split"
+                and datetime.fromisoformat(r["created_at"]).astimezone(self.zone).date() == day
             ]
             # Preserve the day a manual entry was made even after a later import merges it.
             rows = list(

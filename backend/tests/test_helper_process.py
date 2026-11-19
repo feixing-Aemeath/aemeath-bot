@@ -9,6 +9,7 @@ import pytest
 from core import helper_process
 from core.apple import SwiftAppleBridge
 from plugins.screen.helper import JsonHelper
+from plugins.screen.session import DesktopState
 
 
 def helper(tmp_path):
@@ -40,6 +41,21 @@ async def test_a_cancelled_job_stops_the_helpers_child_too(tmp_path):
         await task
     await asyncio.sleep(1.3)
     assert not late.exists()
+
+
+@pytest.fixture(autouse=True)
+def unlocked_screen(monkeypatch):
+    """The checks before a capture read the real Mac's lock state otherwise."""
+
+    async def unlocked():
+        return False
+
+    monkeypatch.setattr("plugins.screen.helper.screen_is_locked", unlocked)
+
+    async def available():
+        return DesktopState()
+
+    monkeypatch.setattr("plugins.screen.helper.desktop_state", available)
 
 
 async def test_both_helpers_run_in_their_own_group(tmp_path, monkeypatch):

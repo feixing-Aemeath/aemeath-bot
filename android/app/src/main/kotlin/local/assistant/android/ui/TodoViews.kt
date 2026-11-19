@@ -116,7 +116,7 @@ fun TodayTodos(
             fontWeight = FontWeight.Medium
         )
         if (todos.isEmpty()) Muted("今天没有待办。")
-        todos.filter { it.status != "deleted" }
+        todos.filter { it.visible }
             .forEach { todo ->
                 TodoRow(
                     todo,

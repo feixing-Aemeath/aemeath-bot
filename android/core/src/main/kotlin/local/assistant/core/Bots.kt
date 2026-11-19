@@ -164,7 +164,18 @@ data class BotMessage(
     val preview get() = (title ?: text.lineSequence().firstOrNull().orEmpty()).replace("**", "")
 }
 
+suspend fun sendDraft(submitted: String, current: () -> String, clear: () -> Unit, send: suspend (String) -> Boolean) {
+    if (send(submitted) && current() == submitted) clear()
+}
+
 object BotTimeline {
+    // Rows already shown keep their place when two share a time. On a tie between copies of one
+    // row the server's wins: hiding a bill's password changes the text, not the time.
+    fun mergeChat(existing: List<ChatMessage>, incoming: List<ChatMessage>): List<ChatMessage> =
+        (existing + incoming.asReversed()).groupBy { it.id }.values.map { versions ->
+            versions.asReversed().maxWith(compareBy<ChatMessage> { instant(it.updatedAt) }.thenBy { if (it.status == "pending") 0 else 1 })
+        }.sortedBy { instant(it.createdAt) }
+
     fun chat(lines: List<ChatMessage>) = lines.mapNotNull { line ->
         when {
             line.author == "me" -> BotMessage(
@@ -185,7 +196,7 @@ object BotTimeline {
                 "app",
                 instant(line.updatedAt),
                 when (line.error) {
-                    "interrupted" -> "没回复完：Mac 上的后端重启了，再发一次吧。"
+                    "interrupted" -> "没回复完：后端重启了，再发一次吧。"
                     "all_harnesses_failed" -> "没能回复：Claude Code 和 Codex 都没完成，可能还没登录，或者额度用完了。"
                     else -> "没能回复，再发一次试试。"
                 },
@@ -207,26 +218,35 @@ object BotTimeline {
     ): List<BotMessage> {
         val said = mutableListOf<BotMessage>()
         if (bot.kind == BotKind.ASSISTANT) {
-            runs.filter {
+            val extractions = runs.filter {
                 it.job == "extract_todos" &&
                     instant(it.startedAt).atZone(zone).toLocalDate() == now.atZone(zone).toLocalDate()
             }
-                .forEach {
-                    val agent = Names.harness(it.harness) + if (it.attempt > 1) "（第 ${it.attempt} 次）" else ""
-                    val text = when (it.status) {
-                        "running" -> "正在提炼待办… · $agent"
-                        "succeeded" -> "提炼完一次待办 · $agent · 用时 ${RunText.duration(it, now)}"
-                        "failed" -> "提炼待办失败：${RunText.error(it.error) ?: "未知原因"} · $agent"
-                        else -> "提炼待办被取消了 · $agent"
-                    }
-                    said += BotMessage(
-                        "run-${it.id}",
-                        "bot",
-                        instant(it.finishedAt ?: it.startedAt),
-                        text,
-                        failed = it.status == "failed"
-                    )
+            extractions.filter { it.status != "succeeded" }.forEach {
+                val agent = Names.harness(it.harness) + if (it.attempt > 1) "（第 ${it.attempt} 次）" else ""
+                val text = when (it.status) {
+                    "running" -> "正在提炼待办… · $agent"
+                    "failed" -> "提炼待办失败：${RunText.error(it.error) ?: "未知原因"} · $agent"
+                    else -> "提炼待办被取消了 · $agent"
                 }
+                said += BotMessage(
+                    "run-${it.id}",
+                    "bot",
+                    instant(it.finishedAt ?: it.startedAt),
+                    text,
+                    failed = it.status == "failed"
+                )
+            }
+            val done = extractions.filter { it.status == "succeeded" }
+            done.sortedBy { instant(it.finishedAt ?: it.startedAt) }.lastOrNull()?.let { last ->
+                val at = instant(last.finishedAt ?: last.startedAt)
+                said += BotMessage(
+                    "runs-${format(now, "yyyy-MM-dd", zone)}",
+                    "bot",
+                    at,
+                    "今天提炼了 ${done.size} 次待办，最近一次 ${format(at, "HH:mm", zone)} · ${Names.harness(last.harness)}"
+                )
+            }
             if (today != null && today.summary.isNotEmpty()) said += BotMessage(
                 "summary-${today.date}",
                 "bot",
@@ -250,7 +270,7 @@ object BotTimeline {
                         "digest-${bot.id}-${day.date}",
                         "bot",
                         at,
-                        day.notes.joinToString("\n"),
+                        spaced(day.notes),
                         todos = day.todos
                     )
                 }
@@ -277,15 +297,29 @@ object BotTimeline {
         it.author == "bot" && it.at > (seen ?: firstLaunch)
     }
 
-    fun recent(messages: List<BotMessage>, days: Int, zone: ZoneId): Pair<List<BotMessage>, Int> {
-        val dates = messages.map { it.at.atZone(zone).toLocalDate() }.distinct().sortedDescending()
-        if (days <= 0 || dates.size <= days) return messages to 0
-        return messages.filter { it.at.atZone(zone).toLocalDate() >= dates[days - 1] } to (dates.size - days)
+    fun spaced(lines: List<String>) = lines.mapIndexed { index, line ->
+        if (index > 0 && line.startsWith("**")) "\n$line" else line
+    }.joinToString("\n")
+
+    fun recent(messages: List<BotMessage>, earlier: Int, now: Instant, zone: ZoneId): Pair<List<BotMessage>, List<LocalDate>> {
+        val today = now.atZone(zone).toLocalDate()
+        val dates = messages.map { it.at.atZone(zone).toLocalDate() }.filter { it < today }.distinct().sortedDescending()
+        val shown = dates.take(earlier.coerceAtLeast(0)).toSet()
+        return messages.filter {
+            val date = it.at.atZone(zone).toLocalDate()
+            date >= today || date in shown
+        } to dates.drop(earlier.coerceAtLeast(0))
     }
 
-    fun day(at: Instant, now: Instant, zone: ZoneId): String = when (at.atZone(zone).toLocalDate()) {
+    fun earlierLabel(hidden: List<LocalDate>, now: Instant, zone: ZoneId): String? = hidden.firstOrNull()?.let {
+        "看${day(it, now, zone)}的消息" + if (hidden.size > 1) "（更早还有 ${hidden.size - 1} 天）" else ""
+    }
+
+    fun day(at: Instant, now: Instant, zone: ZoneId): String = day(at.atZone(zone).toLocalDate(), now, zone)
+
+    private fun day(date: LocalDate, now: Instant, zone: ZoneId): String = when (date) {
         now.atZone(zone).toLocalDate() -> "今天"
         now.atZone(zone).toLocalDate().minusDays(1) -> "昨天"
-        else -> format(at, "M月d日", zone)
+        else -> "${date.monthValue}月${date.dayOfMonth}日"
     }
 }

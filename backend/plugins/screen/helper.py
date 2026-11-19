@@ -15,8 +15,8 @@ The helper is one executable speaking JSON over stdin/stdout, one request per pr
 
 Every request also names the app ("qq" / "wechat" / "chrome") and the folder for screenshots
 ("out_dir", the plugin's data folder). A failed request exits non-zero and prints
-{"error": "screen_…"}; a capture that fails while the Mac's screen is locked is reported as
-screen_locked, since only unlocking helps.
+{"error": "screen_…"}. Captures preflight the active desktop session and display power;
+locked, login window, inactive console and sleeping displays have separate error codes.
 
 The helper is backend/helpers/screen-helper (Swift): it finds the conversation list and the
 chat area from the window's own dividers, captures them with ScreenCaptureKit and runs Apple
@@ -27,15 +27,16 @@ capture_page only captures the browser window of a page the user keeps open (the
 
 import asyncio
 import json
-import plistlib
 import re
 import sys
 import weakref
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from core import helper_process
 from plugins.screen.model import Screenshot, TextBlock
+from plugins.screen.session import CONSOLE_COMMAND, DesktopState, console_state, displays_asleep
 
 ACTIONS = {
     "preview",
@@ -46,23 +47,24 @@ ACTIONS = {
     "permissions",
     "layout",
 }
-IOREG = "/usr/sbin/ioreg"
 _locks = weakref.WeakKeyDictionary()
 
 
-async def screen_is_locked():
-    """Whether the Mac's screen is locked. ScreenCaptureKit then captures nothing, so every read
-    fails until the user unlocks; with 「需要密码」 on in 系统设置 → 锁定屏幕 the display turning
-    off at night locks it. False when it cannot tell."""
+async def desktop_state():
+    # The console probe is macOS's; Windows has its own helper and no ioreg or getuid.
+    if sys.platform != "darwin":
+        return DesktopState()
     try:
-        code, output = await helper_process.run([IOREG, "-n", "Root", "-d1", "-a"], None, 10)
-        root = plistlib.loads(output) if code == 0 else {}
-    except (OSError, TimeoutError, ValueError, plistlib.InvalidFileException):
-        return False
-    users = root.get("IOConsoleUsers") or []
-    return bool(root.get("IOConsoleLocked")) or any(
-        isinstance(user, dict) and user.get("CGSSessionScreenIsLocked") for user in users
-    )
+        code, output = await helper_process.run(CONSOLE_COMMAND, None, 10)
+    except (OSError, TimeoutError):
+        output, code = b"", 1
+    state = console_state(output if code == 0 else b"")
+    return replace(state, display_asleep=await asyncio.to_thread(displays_asleep))
+
+
+async def screen_is_locked():
+    """Compatibility probe: only the active user's lock, independent of display sleep."""
+    return (await desktop_state()).code == "screen_locked"
 
 
 def screen_lock():
@@ -95,6 +97,10 @@ class JsonHelper:
             "out_dir": str(self.out_dir) if self.out_dir else None,
         }
         async with screen_lock():
+            if payload["action"] != "recognize":
+                state = await desktop_state()
+                if state.code:
+                    raise RuntimeError(state.code)
             try:
                 returncode, output = await helper_process.run(
                     argv,
@@ -107,6 +113,10 @@ class JsonHelper:
                     ),
                 )
             except TimeoutError:
+                if payload["action"] != "recognize":
+                    state = await desktop_state()
+                    if state.code:
+                        raise RuntimeError(state.code) from None
                 raise RuntimeError("screen_helper_timeout") from None
         if returncode:
             try:
@@ -114,13 +124,14 @@ class JsonHelper:
             except (ValueError, AttributeError):
                 error = ""
             # Only the helper's fixed codes, e.g. screen_window_not_found, never free text.
-            code = error if re.fullmatch(r"screen_[a-z_]{1,40}", error) else "screen_helper_failed"
-            if (
-                sys.platform == "darwin"
-                and payload["action"] != "recognize"
-                and await screen_is_locked()
-            ):
-                code = "screen_locked"
+            code = (
+                error
+                if isinstance(error, str) and re.fullmatch(r"screen_[a-z_]{1,40}", error)
+                else "screen_helper_failed"
+            )
+            if payload["action"] != "recognize":
+                state = await desktop_state()
+                code = state.code or code
             raise RuntimeError(code)
         return json.loads(output)
 

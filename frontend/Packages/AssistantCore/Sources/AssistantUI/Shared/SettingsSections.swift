@@ -29,9 +29,9 @@
                     }
                 HStack {
                     Text(
-                        store.online
+                        store.authorizationIssue ?? (store.online
                             ? (store.connection.useMockData ? "正在使用模拟数据" : "已连接 \(store.connection.baseURL)")
-                            : "连不上：检查地址、令牌和 Tailscale"
+                            : "连不上：检查地址、令牌和 Tailscale")
                     )
                     .font(.caption)
                     .foregroundStyle(store.online ? Color.secondary : Color.red)

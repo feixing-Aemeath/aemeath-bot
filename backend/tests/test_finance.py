@@ -15,7 +15,7 @@ import pytest
 
 from core.documents import FakeExtractor
 from core.mcp_server import create_mcp
-from core.models import Card, PluginPatch
+from core.models import Card, PluginPatch, RuntimeSettings
 from core.plugins import PluginContext
 from core.tokens import MAIN, Grant, current_grant
 from plugins.finance import parsers
@@ -919,6 +919,16 @@ async def test_reimbursement_no_decision_and_notification_survive_manual_merge(f
     assert finance.context.store.digests(plugin="finance") == before
 
 
+async def test_runtime_timezone_change_updates_finance_day_boundaries(finance):
+    await finance.finance_add({"amount": 18, "occurred_at": "2026-10-01T00:30:00+08:00"})
+    assert (await finance.finance_summary({}))["spent_cents"] == 1800
+    finance.context.store.db.put(
+        "settings", RuntimeSettings(timezone="America/Los_Angeles").model_dump()
+    )
+    assert (await finance.finance_summary({}))["spent_cents"] == 0
+    assert finance.zone.key == finance.ledger.zone.key == "America/Los_Angeles"
+
+
 async def test_year_budget_and_timezone_allowance_boundary(finance):
     ingest(
         finance,
@@ -1477,6 +1487,67 @@ async def test_assets_are_the_newest_balance_of_each_account(finance, monkeypatc
             await finance.finance_balance(bad)
 
 
+async def test_an_allowance_told_in_chat_counts_in_assets_until_the_statement_has_it(finance):
+    """As on 11/1: the user told 记账 the allowance came, before any November bill."""
+    import hashlib
+
+    finance.ledger.config = {"family": ["家长甲"]}
+    card = "招商银行(0000)"
+
+    def allowance(source_id, at):
+        return raw(
+            source_id, at=at, amount=200000, direction="in", kind="income",
+            counterpart="家长甲", method=card,
+        )  # fmt: skip
+
+    october = parsers.Statement(
+        "cmb", [allowance("oct", "2026-10-06")], date(2026, 10, 1), date(2026, 10, 28),
+        balances={card: 150000},
+    )  # fmt: skip
+    finance.ledger.imported(october, "a" * 64, finance.now().isoformat())
+    await finance.finance_balance({"account": "微信零钱", "amount": 300})
+    finance.now = lambda: datetime(2026, 11, 1, 12, tzinfo=ZONE)
+    await finance.finance_add(
+        {"amount": 2000, "direction": "in", "kind": "allowance", "note": "生活费"}
+    )
+    assets = await finance.finance_balance({})
+    bank = next(a for a in assets["accounts"] if a["account"] == card)
+    assert bank["amount_cents"] == 150000 + 200000 and bank["as_of"] == "2026-10-28"
+    assert bank["allowances"] == [{"day": "2026-11-01", "amount_cents": 200000}]
+    assert assets["total_cents"] == 30000 + 350000
+    label = next(c for c in await finance.cards() if c["title"] == "现有资产")["data"]["label"]
+    assert f"{card} 3500.00（10-28）（含 11/1 到账的生活费）" in label
+    # Spent in November: one allowance, the told one.
+    assert finance.ledger.summary("cycle", date(2026, 11, 2))["budget_cents"] == 200000
+
+    # A balance the user gives on the day it came already holds it.
+    await finance.finance_balance({"account": card, "amount": 3400})
+    bank = next(a for a in finance.ledger.assets()["accounts"] if a["account"] == card)
+    assert bank["amount_cents"] == 340000 and "allowances" not in bank
+    finance.ledger.db.execute(
+        "DELETE FROM finance_balances WHERE origin='user' AND at='2026-11-01'"
+    )
+
+    # The November statement brings the same allowance and a newer balance: its row takes the
+    # told one's place, so the allowance is neither income nor counted twice.
+    november = parsers.Statement(
+        "cmb", [allowance("nov", "2026-11-01")], date(2026, 11, 1), date(2026, 11, 28),
+        balances={card: 90000},
+    )  # fmt: skip
+    finance.now = lambda: datetime(2026, 11, 29, 12, tzinfo=ZONE)
+    finance.ledger.imported(november, hashlib.sha256(b"nov").hexdigest(), finance.now().isoformat())
+    kinds = {r["source_id"]: r["kind"] for r in finance.ledger.rows(visible=True)}
+    assert kinds["nov"] == "allowance" and len(kinds) == 2
+    assert finance.ledger.summary("cycle", date(2026, 11, 20))["budget_cents"] == 200000
+    bank = next(a for a in finance.ledger.assets()["accounts"] if a["account"] == card)
+    assert bank == {
+        "account": card,
+        "amount_cents": 90000,
+        "as_of": "2026-11-28",
+        "origin": "statement",
+    }
+
+
 async def test_a_holders_name_kept_by_an_earlier_reader_is_replaced(finance):
     from plugins.finance.ledger import Ledger
 
@@ -1807,3 +1878,503 @@ async def test_a_month_without_bills_says_so_and_looks_back(finance):
     assert "10月的账单还没导入" in cards[0]["data"]["label"]
     assert cards[1]["data"]["headline"] == "9月剩了 500 元"
     assert cards[2]["title"] == "9月钱花在哪儿"
+
+
+@pytest.mark.parametrize("source", ["cmb", "manual"])
+async def test_split_follows_the_surviving_imported_charge(finance, source):
+    finance.config["family_pays"] = ["apple.com/bill"]
+    charge = raw("charge", amount=16400, item="apple.com/bill", method="招商银行(0000)")
+    if source == "manual":
+        row = await finance.finance_add(
+            {"amount": 164, "occurred_at": charge["occurred_at"], "item": charge["item"]}
+        )
+    else:
+        ingest(finance, [charge], source)
+        row = finance.ledger.rows(True)[0]
+    part = (await finance.finance_split({"id": row["id"], "amount": 128, "category": "娱乐"}))[
+        "part"
+    ]
+    ingest(finance, [{**charge, "source_id": "wechat-charge"}])
+    summary = await finance.finance_summary({})
+    assert (summary["spent_cents"], summary["pending_reimbursement_cents"]) == (12800, 3600)
+    kept = finance.ledger.get(row["id"])
+    assert kept["source"] == "wechat" and kept["split_cents"] == 12800
+    assert finance.ledger.get(part["id"])["source_id"] == kept["id"]
+    await finance.finance_split({"id": row["id"], "amount": 0, "category": "娱乐"})
+    assert not [r for r in finance.ledger.rows() if r["source"] == "split"]
+
+
+@pytest.mark.parametrize("refund", [8000, 16400])
+@pytest.mark.parametrize("status_only", [False, True])
+async def test_refunds_reduce_a_split_charge_without_leaving_phantom_spending(
+    finance, refund, status_only
+):
+    charge = raw("charge", amount=16400)
+    ingest(finance, [charge])
+    row = finance.ledger.rows()[0]
+    await finance.finance_split({"id": row["id"], "amount": 128, "category": "娱乐"})
+    if status_only:
+        ingest(
+            finance,
+            [{**charge, "full_refund": int(refund == 16400), "refunded_cents": refund}],
+            key="status",
+        )
+    else:
+        ingest(
+            finance,
+            [raw("refund", amount=refund, direction="in", kind="refund", original_id="charge")],
+        )
+    assert (await finance.finance_summary({}))["spent_cents"] == 16400 - refund
+
+
+async def test_split_does_not_add_another_payment_to_the_daily_totals(finance):
+    ingest(finance, [raw("charge", amount=16400)])
+    row = finance.ledger.rows()[0]
+    before = await finance.daily(finance.now().date())
+    await finance.finance_split({"id": row["id"], "amount": 128, "category": "娱乐"})
+    assert await finance.daily(finance.now().date()) == before
+
+
+async def test_split_rechecks_an_existing_reimbursement(finance):
+    finance.config |= {"family": ["家长甲"], "family_pays": ["apple.com/bill"]}
+    ingest(finance, [raw("charge", at="2026-10-20", amount=16400, item="apple.com/bill")])
+    charge = finance.ledger.rows()[0]
+    ingest(
+        finance,
+        [
+            raw(
+                "back",
+                at="2026-10-21",
+                amount=3600,
+                direction="in",
+                kind="income",
+                counterpart="家长甲",
+            )
+        ],
+    )
+    await finance.finance_split({"id": charge["id"], "amount": 128, "category": "娱乐"})
+    summary = await finance.finance_summary({})
+    assert summary["pending_reimbursement_cents"] == 0
+    assert summary["reimbursed_cents"] == 3600
+
+
+async def test_categorizing_a_split_changes_the_selected_part(finance):
+    ingest(finance, [raw("charge", amount=16400)])
+    charge = finance.ledger.rows()[0]
+    part = (await finance.finance_split({"id": charge["id"], "amount": 128, "category": "娱乐"}))[
+        "part"
+    ]
+    result = await finance.finance_categorize({"id": part["id"], "category": "购物"})
+    assert result["category"] == "购物"
+    assert (await finance.finance_summary({}))["categories"]["购物"] == 16400
+
+
+async def test_a_split_is_not_a_second_import_of_an_unrelated_manual_payment(finance):
+    manual = await finance.finance_add({"amount": 128, "occurred_at": "2026-10-20T12:00:00+08:00"})
+    ingest(finance, [raw("charge", amount=16400)])
+    charge = next(r for r in finance.ledger.rows() if r["source"] == "wechat")
+    await finance.finance_split({"id": charge["id"], "amount": 128, "category": "娱乐"})
+    finance.ledger.reconcile()
+    assert finance.ledger.get(manual["id"])["id"] == manual["id"]
+    assert (await finance.finance_summary({}))["spent_cents"] == 16400 + 12800
+
+
+async def test_two_bank_candidates_for_one_platform_payment_remain_visible(finance):
+    ingest(
+        finance,
+        [raw("bank1", method="招商银行(0000)"), raw("bank2", method="招商银行(0000)")],
+        "cmb",
+    )
+    ingest(finance, [raw("platform", method="招商银行(0000)")])
+    assert len(finance.ledger.rows(True)) == 3
+    assert not any(r["linked_id"] for r in finance.ledger.rows())
+
+
+async def test_two_manual_candidates_for_one_import_remain_visible(finance):
+    for request in ("chat1", "chat2"):
+        await finance.finance_add(
+            {"amount": 18, "occurred_at": "2026-10-20T12:00:00+08:00", "request_id": request}
+        )
+    ingest(finance, [raw("platform")])
+    assert len(finance.ledger.rows(True)) == 3
+    assert not any(r["linked_id"] for r in finance.ledger.rows())
+
+
+@pytest.mark.parametrize("refund_first", [True, False])
+async def test_bank_refund_follows_the_surviving_platform_purchase(finance, refund_first):
+    purchase = raw(
+        "bank", amount=5000, method="招商银行(0000)", counterpart="测试商店", item="购物"
+    )
+    refund = raw(
+        "bank-refund",
+        at="2026-10-21",
+        amount=5000,
+        direction="in",
+        kind="refund",
+        method="招商银行(0000)",
+        counterpart="测试商店",
+        item="快捷退款",
+        original_id="bank",
+    )
+    ingest(finance, [purchase] + ([refund] if refund_first else []), "cmb")
+    ingest(finance, [{**purchase, "source_id": "platform", "item": "测试教材", "category": "学习"}])
+    if not refund_first:
+        ingest(finance, [refund], "cmb", key="refund-later")
+    visible = finance.ledger.rows(True)
+    platform = next(r for r in visible if r["source"] == "wechat")
+    returned = next(r for r in visible if r["kind"] == "refund")
+    assert returned["refund_of"] == platform["id"]
+    assert (await finance.finance_summary({}))["spent_cents"] == 0
+
+
+async def test_bank_refund_status_follows_the_surviving_platform_purchase(finance):
+    ingest(finance, [raw("bank", amount=5000, method="招商银行(0000)", full_refund=1)], "cmb")
+    ingest(finance, [raw("platform", amount=5000, method="招商银行(0000)")])
+    assert (await finance.finance_summary({}))["spent_cents"] == 0
+
+
+async def test_category_correction_rechecks_undecided_home_expenses(finance):
+    await finance.finance_home({"start": "2026-10-20", "end": "2026-10-20"})
+    ingest(finance, [raw("renewal", amount=3000, item="未知扣款")])
+    row = finance.ledger.rows(True)[0]
+    assert row["reimburse"] == "ask"
+    await finance.finance_categorize({"id": row["id"], "category": "会员订阅"})
+    summary = await finance.finance_summary({})
+    assert (summary["spent_cents"], summary["ask_cents"]) == (3000, 0)
+    await finance.finance_reimburse({"ids": [row["id"]], "decision": "yes"})
+    await finance.finance_categorize({"id": row["id"], "category": "购物"})
+    assert finance.ledger.get(row["id"])["reimburse"] == "yes"
+
+
+async def test_zip_does_not_claim_coverage_between_disjoint_statements(finance):
+    path = finance.importer.ensure() / "gap.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        for month in (8, 10):
+            archive.writestr(
+                f"{month}.csv",
+                csv_bill(
+                    [wx(f"month{month}", at=f"2026-{month:02d}-10 12:00:00")],
+                    start=f"2026-{month:02d}-01",
+                    end=f"2026-{month:02d}-31",
+                ),
+            )
+    assert (await finance.scan())["files"][0]["status"] == "archived"
+    finance.config["sources"] = ["wechat"]
+    assert finance.reports.due(date(2026, 10, 1)) is None
+
+
+async def test_zip_preserves_each_cards_balance_date(finance):
+    path = finance.importer.ensure() / "cards.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in ("older.pdf", "newer.pdf"):
+            archive.writestr(name, name.encode())
+    finance.context.memory.documents.extractor = FakeExtractor(
+        {
+            "statement-0.pdf": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "text": PDF.replace(
+                            "查询期间：2026-10-01 至 2026-10-31",
+                            "查询期间：2026-10-01 至 2026-10-20\n账号：6214********1111",
+                        ),
+                    }
+                ]
+            },
+            "statement-1.pdf": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "text": PDF.replace(
+                            "查询期间：2026-10-01 至 2026-10-31",
+                            "查询期间：2026-10-01 至 2026-10-28\n账号：6214********2222",
+                        ),
+                    }
+                ]
+            },
+        }
+    )
+    assert (await finance.scan())["files"][0]["status"] == "archived"
+    accounts = (await finance.finance_balance({}))["accounts"]
+    assert {a["account"]: a["as_of"] for a in accounts} == {
+        "招商银行(1111)": "2026-10-20",
+        "招商银行(2222)": "2026-10-28",
+    }
+
+
+async def test_daily_totals_count_a_reimbursed_split_charge_only_once(finance):
+    ingest(finance, [raw("charge", amount=16400, method="招商银行(0000)")], "cmb")
+    row = finance.ledger.rows(True)[0]
+    await finance.finance_split({"id": row["id"], "amount": 128, "category": "娱乐"})
+    before = await finance.daily(finance.now().date())
+    ingest(finance, [raw("platform", amount=16400, method="招商银行(0000)")])
+    assert await finance.daily(finance.now().date()) == before
+
+
+async def test_monthly_chart_does_not_invent_unimported_months(finance):
+    finance.config["sources"] = ["wechat"]
+    ingest(finance, [raw("aug", at="2026-08-01"), raw("sep", at="2026-09-30")])
+    chart = next(c for c in await finance.cards() if c["title"] == "每月花销")
+    assert [p["x"] for p in chart["data"]["points"]] == ["8月", "9月"]
+
+
+async def test_reread_refuses_changed_archive_bytes(finance):
+    inbox(finance, "bill.csv", csv_bill())
+    await finance.scan()
+    imported = finance.ledger.db.rows("SELECT * FROM finance_imports")[0]
+    archived = finance.context.memory.root / imported["archive_path"]
+    archived.write_bytes(csv_bill([wx(), wx("unexpected", amount="999.00")]))
+    with pytest.raises(FinanceError, match="归档账单的内容变了"):
+        await finance.finance_reread({})
+    assert len(finance.ledger.rows()) == 1
+
+
+async def test_advice_does_not_extrapolate_a_period_missing_its_start(finance):
+    finance.config["sources"] = ["wechat"]
+    inbox(finance, "late.csv", csv_bill([wx(amount="500.00")], start="2026-10-20"))
+    await finance.scan()
+    hero, suggestion = (await finance.cards())[:2]
+    assert "未确认完整覆盖" not in hero["data"]["label"]
+    assert "微信账单截至" in hero["data"]["label"]
+    assert "照这个节奏，月底能剩" not in suggestion["data"]["headline"]
+
+
+async def test_synthetic_bills_end_to_end_card_amounts_and_privacy(finance, caplog):
+    finance.config |= {"family": ["家长甲"], "family_pays": ["apple.com/bill"]}
+    await finance.finance_home({"start": "2026-10-03", "end": "2026-10-03"})
+    wx_rows = [
+        wx("sep-meal", "100.00", "2026-09-10 12:00:00"),
+        wx("takeout", "100.00", "2026-10-02 12:00:00", item="美团外卖", method="招商银行(0000)"),
+        wx("home", "60.00", "2026-10-03 12:00:00"),
+        wx(
+            "apple",
+            "200.00",
+            "2026-10-04 12:00:00",
+            item="apple.com/bill",
+            counterpart="测试苹果商户",
+        ),
+        wx("phone", "300.00", "2026-10-05 12:00:00", item="手机", counterpart="测试手机商户"),
+        wx("book", "80.00", "2026-10-06 12:00:00", item="教材", counterpart="测试书店"),
+        wx(
+            "book-back",
+            "20.00",
+            "2026-10-08 12:00:00",
+            direction="收入",
+            kind="退款",
+            note="原订单号：book",
+        ),
+        wx(
+            "red",
+            "20.00",
+            "2026-10-09 12:00:00",
+            direction="收入",
+            kind="微信红包",
+            counterpart="同学甲",
+        ),
+        wx("dividend", "40.00", "2026-10-09 12:00:00", direction="收入", item="分红"),
+        wx(
+            "sep-back",
+            "50.00",
+            "2026-10-10 12:00:00",
+            direction="收入",
+            kind="退款",
+            note="原订单号：sep-meal",
+        ),
+    ]
+    xlsx(
+        finance.importer.ensure() / "wechat.xlsx",
+        [
+            ["起始时间：2026-09-01"],
+            ["终止时间：2026-10-29"],
+            WX,
+            *wx_rows,
+        ],
+    )
+    inbox(
+        finance,
+        "alipay.csv",
+        csv_bill(
+            [ali("metro", "30.00", "2026-10-07 12:00:00", method="余额", item="地铁")],
+            source="alipay",
+            start="2026-09-01",
+            end="2026-10-29",
+            encoding="gb18030",
+        ),
+    )
+    bank_pdf = """招商银行合成流水
+查询期间：2026-09-01 至 2026-10-29
+账号：6214********0000
+记账日期 货币 交易金额 联机余额 交易摘要 对手信息
+2026-10-01 CNY +2000.00 2500.00 转账 家长甲
+2026-10-02 CNY -100.00 2400.00 快捷支付 测试银行商户
+2026-10-05 CNY +150.00 2550.00 转账 家长甲
+2026-10-12 CNY +7.00 2557.00 转账 同学乙
+"""
+    inbox(finance, "bank.pdf", b"%PDF-synthetic-audit")
+    finance.context.memory.documents.extractor = FakeExtractor(
+        {
+            "bank.pdf": {"pages": [{"page": 1, "text": bank_pdf}]},
+        }
+    )
+    assert {r["status"] for r in (await finance.scan())["files"]} == {"archived"}
+    # Same bytes and overlapping rows are independently idempotent.
+    inbox(
+        finance,
+        "wechat-copy.xlsx",
+        (finance.importer.ensure() / "账单原件/微信/2026/wechat.xlsx").read_bytes(),
+    )
+    assert (await finance.scan())["files"][0]["status"] == "duplicate"
+    inbox(finance, "overlap.csv", csv_bill([wx_rows[1]], start="2026-10-01", end="2026-10-29"))
+    await finance.scan()
+    assert len(finance.ledger.rows()) == 15
+    rows = {r["source_id"]: r for r in finance.ledger.rows(True)}
+    await finance.finance_big({"id": rows["phone"]["id"], "note": "测试手机"})
+    await finance.finance_split({"id": rows["apple"]["id"], "amount": 50, "category": "娱乐"})
+    await finance.finance_add(
+        {"amount": 10, "category": "交通", "occurred_at": "2026-10-11", "request_id": "audit-bus"}
+    )
+    await finance.finance_balance({"account": "微信零钱", "amount": 50})
+    summary = await finance.finance_summary({})
+    expected = {
+        "budget_cents": 200000,
+        "spent_cents": 25000,
+        "remaining_cents": 175000,
+        "daily_cents": 58333,
+        "ask_cents": 6000,
+        "pending_reimbursement_cents": 0,
+        "reimbursed_cents": 15000,
+        "big_cents": 30000,
+        "extra_income_cents": 6000,
+        "red_packet_cents": 2000,
+        "dividend_cents": 4000,
+        "unknown_income_cents": 700,
+        "assets_cents": 260700,
+    }
+    assert {k: summary[k] for k in expected} == expected
+    assert {k: v for k, v in summary["categories"].items() if v} == {
+        "吃饭": 10000,
+        "交通": 4000,
+        "娱乐": 5000,
+        "学习": 6000,
+    }
+    assert (summary["takeout_cents"], summary["takeout_count"]) == (10000, 1)
+    assert (await finance.finance_summary({"period": "previous"}))["spent_cents"] == 5000
+    assert (await finance.finance_summary({"period": "year"}))["spent_cents"] == 30000
+    result = await finance.cards()
+    for card in result:
+        Card.model_validate(card)
+    cards = {c["title"]: c["data"] for c in result}
+    assert len(cards) == 8
+    assert cards["10月还能花"]["value"] == "1,750"
+    assert "已花 250 / 2,000 元 · 还有 3 天，每天约 583 元" in cards["10月还能花"]["label"]
+    assert sum(s["y"] for s in cards["10月还能花"]["bar"]["segments"]) == 250
+    assert cards["记账的建议"]["headline"] == "照这个节奏，月底能剩 1,733 元左右"
+    assert "可以拿 850 元" in cards["记账的建议"]["text"]
+    assert cards["10月钱花在哪儿"]["value"] == "250"
+    assert cards["10月钱花在哪儿"]["points"] == cards["10月还能花"]["bar"]["segments"]
+    assert "外卖 1 次 100 元" in cards["10月钱花在哪儿"]["label"]
+    assert [(p["x"], p["y"]) for p in cards["每月花销"]["points"]] == [("9月", 50), ("10月", 250)]
+    assert cards["每月花销"]["target"]["value"] == 2000
+    assert cards["现有资产"]["value"] == "2607.00"
+    assert cards["今年额外收入"]["value"] == "60"
+    assert "红包 20 元 · 分红等 40 元" in cards["今年额外收入"]["label"]
+    assert cards["今年的大件"]["items"] == [
+        {"title": "2026-10-05 测试手机", "subtitle": "300.00 元 · 自己的钱，不占生活费"}
+    ]
+    assert {i["title"]: i["subtitle"] for i in cards["账单"]["items"]}.items() >= {
+        "在家时的花销": "60.00 元，算家里的，不占生活费；家里没报的跟记账说",
+        "家里报销": "150.00 元，不占生活费",
+        "未分类转入": "7.00 元；可在对话里确认收入类型",
+    }.items()
+    daily = await finance.daily(finance.now().date())
+    assert "当天新增记账 15 笔；支出合计 880.00 元，转入合计 2287.00 元" in daily["body"]
+    await finance.reimburse_check()
+    captured = []
+
+    async def agent(job, prompt, **kwargs):
+        captured.append(prompt)
+        with as_grant(kwargs["grant"]):
+            data = await finance.finance_report_input({"start": "2026-10-01"})
+            captured.append(json.dumps(data, ensure_ascii=False))
+            assert (data["current"]["spent_cents"], data["previous"]["spent_cents"]) == (
+                25000,
+                5000,
+            )
+            assert data["display_yuan"]["big"] == "300.00"
+            await finance.finance_report_write(
+                {
+                    "start": "2026-10-01",
+                    "text": "本周期已花250元，剩余1750元。账单尚未覆盖最后两天。",
+                }
+            )
+
+    finance.context.run_agent = agent
+    finance.now = lambda: datetime(2026, 11, 5, 9, tzinfo=ZONE)
+    await finance.monthly_report()
+    report = finance.reports.row(date(2026, 10, 1))
+    path = finance.context.memory.root / report["path"]
+    assert "已花：250.00 元；剩余：1750.00 元" in path.read_text()
+    assert "测试手机商户" in path.read_text()  # Details stay in the private local report.
+    finance.context.memory.index_one(path)
+    with as_grant(Grant(None, "bot", frozenset({"mcp"}), "知识库", "bot")):
+        public_summary = await finance.finance_summary({"period": "previous"})
+        assert not finance.context.memory.search("测试手机商户")
+        with pytest.raises(ValueError):
+            finance.context.memory.read(report["path"])
+    shared = json.dumps(
+        [daily, public_summary, captured, finance.context.store.digests(plugin="finance")],
+        ensure_ascii=False,
+    )
+    for private in (
+        "测试苹果商户",
+        "测试手机商户",
+        "测试书店",
+        "测试银行商户",
+        "家长甲",
+        "同学甲",
+        "同学乙",
+        "sep-meal",
+        "book-back",
+        "(0000)",
+        "账单原件",
+    ):
+        assert private not in shared
+        assert private not in caplog.text
+
+
+async def test_report_rejects_order_numbers_before_writing_shared_digest(finance):
+    ingest(finance, [raw("AUDIT-PRIVATE-ORDER-123456")])
+    finance.reports.prepare(
+        date(2026, 10, 1), date(2026, 10, 31), date(2026, 11, 5), finance.now().isoformat()
+    )
+    with pytest.raises(FinanceError, match="只能包含汇总"):
+        await finance.finance_report_write(
+            {"start": "2026-10-01", "text": "本月的订单 AUDIT-PRIVATE-ORDER-123456 花了18元。"}
+        )
+    assert not finance.context.store.digests(plugin="finance")["items"]
+
+
+async def test_big_card_and_summary_exclude_the_same_home_expenses(finance):
+    await finance.finance_home({"start": "2026-10-20", "end": "2026-10-20"})
+    ingest(finance, [raw("home-purchase", amount=30000)])
+    row = finance.ledger.rows(True)[0]
+    await finance.finance_big({"id": row["id"]})
+    summary = await finance.finance_summary({})
+    assert (summary["big_cents"], summary["ask_cents"]) == (0, 30000)
+    assert not any(c["title"] == "今年的大件" for c in await finance.cards())
+    await finance.finance_reimburse({"ids": [row["id"]], "decision": "no"})
+    assert (await finance.finance_summary({}))["big_cents"] == 30000
+    assert (
+        next(c for c in await finance.cards() if c["title"] == "今年的大件")["data"]["items"][0][
+            "subtitle"
+        ]
+        == "300.00 元 · 自己的钱，不占生活费"
+    )
+
+
+@pytest.mark.parametrize("source", ["wechat", "alipay"])
+@pytest.mark.parametrize("status", ["支付失败", "交易失败", "已取消", "等待买家付款"])
+def test_failed_or_unpaid_payments_are_not_booked(source, status):
+    row = wx(status=status) if source == "wechat" else ali(status=status)
+    result = parsers.tables(parsers.csv_rows(csv_bill([row], source=source)), ZONE)
+    assert result.rows == []

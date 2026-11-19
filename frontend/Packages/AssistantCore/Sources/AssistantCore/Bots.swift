@@ -157,11 +157,13 @@ public struct BotMessage: Hashable, Identifiable, Sendable {
     public var text: String
     /// Todos that came out of it, e.g. on the day of a digest.
     public var todos: [Todo]
+    /// Cards the Bot attached to a chat reply, as they were then.
+    public var cards: [Card]
     public var failed: Bool
 
     public init(
         id: String, author: Author, date: Date, title: String? = nil, text: String,
-        todos: [Todo] = [], failed: Bool = false
+        todos: [Todo] = [], cards: [Card] = [], failed: Bool = false
     ) {
         self.id = id
         self.author = author
@@ -169,27 +171,49 @@ public struct BotMessage: Hashable, Identifiable, Sendable {
         self.title = title
         self.text = text
         self.todos = todos
+        self.cards = cards
         self.failed = failed
     }
 
-    /// One line for the sidebar, without Markdown's bold marks.
+    /// One line for the Bot lists, without Markdown's bold marks: the title, or the first line
+    /// that says something, past a section name over a list (「**新待办**」 then 「- …」) and an
+    /// item's dot. A bold line over plain text is a headline and stays.
     public var preview: String {
-        let line = title ?? text.split(separator: "\n").first.map(String.init) ?? ""
-        return line.replacingOccurrences(of: "**", with: "")
+        if let title { return title.replacingOccurrences(of: "**", with: "") }
+        let lines = RichLine.lines(text)
+        for (index, line) in lines.enumerated() {
+            let said: String
+            switch line {
+            case .bullet(let item), .numbered(_, let item), .heading(let item): said = item
+            case .text(let raw): said = raw
+            case .table(let table): said = table.header.joined(separator: " · ")
+            case .blank: continue
+            case .section(let name):
+                let next = lines[(index + 1)...].first { $0 != .blank }
+                switch next {
+                case .bullet, .numbered: continue
+                default: said = name
+                }
+            }
+            let clean = said.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespaces)
+            if !clean.isEmpty { return clean }
+        }
+        return ""
     }
 }
 
 public enum BotTimeline {
     /// What a Bot said, with what was typed to it (`chat`), oldest first. A plugin: one message
     /// per day of digests with the todos extracted that day, and for the health plugin its
-    /// reports too. The assistant: today's todo extraction runs and today's summary.
+    /// reports too. The assistant: today's summary, and a todo extraction that is going on or
+    /// went wrong.
     public static func messages(
         for bot: Bot, today: Today?, digests: [Digest], todos: [Todo], runs: [Run],
         reports: [HealthReport], chat: [BotMessage] = [], now: Date, calendar: Calendar
     ) -> [BotMessage] {
         let said =
             bot.isAssistant
-            ? assistant(today: today, digests: digests, runs: runs, now: now, calendar: calendar)
+            ? assistant(today: today, digests: digests, todos: todos, runs: runs, now: now, calendar: calendar)
             : digestDays(of: bot.id, digests: digests, todos: todos, runs: runs, calendar: calendar)
                 + (bot.id == "health" ? reports.map(message) : [])
         let messages = said + chat
@@ -210,8 +234,16 @@ public enum BotTimeline {
             guard let last = written.map(\.createdAt).max() else { return nil }
             return BotMessage(
                 id: "digest-\(plugin)-\(day.date)", author: .bot, date: last,
-                text: day.notes.joined(separator: "\n"), todos: day.todos)
+                text: spaced(day.notes), todos: day.todos)
         }
+    }
+
+    /// A day's digest lines with a blank line above each section name (「**通知**」) but the
+    /// first, as the Agent wrote them; `DigestSections` drops blank lines.
+    static func spaced(_ lines: [String]) -> String {
+        lines.enumerated()
+            .map { index, line in index > 0 && line.hasPrefix("**") ? "\n" + line : line }
+            .joined(separator: "\n")
     }
 
     static func message(_ report: HealthReport) -> BotMessage {
@@ -232,18 +264,22 @@ public enum BotTimeline {
     }
 
     static func assistant(
-        today: Today?, digests: [Digest], runs: [Run], now: Date, calendar: Calendar
+        today: Today?, digests: [Digest], todos: [Todo], runs: [Run], now: Date, calendar: Calendar
     ) -> [BotMessage] {
         let extractions = runs.filter {
             $0.job == "extract_todos" && calendar.isDate($0.startedAt, inSameDayAs: now)
         }
-        var messages = extractions.map { run -> BotMessage in
+        // Only what matters to the user: a run going on or gone wrong is a message of its own.
+        // The ones that went fine say nothing here: 「今天提炼了 4 次待办 · Codex」 was a line of
+        // the run log in her voice, and lit her unread dot every time one finished. When she
+        // last read is under her name, and every run is in 设置's 运行记录.
+        var messages = extractions.compactMap { run -> BotMessage? in
             let agent = run.attempt > 1
                 ? "\(Names.harness(run.harness))（第 \(run.attempt) 次）" : Names.harness(run.harness)
             let text: String
             switch run.status {
+            case .succeeded: return nil
             case .running: text = "正在提炼待办… · \(agent)"
-            case .succeeded: text = "提炼完一次待办 · \(agent) · 用时 \(RunText.duration(run, now: now))"
             case .failed: text = "提炼待办失败：\(RunText.error(run.error) ?? "未知原因") · \(agent)"
             case .cancelled: text = "提炼待办被取消了 · \(agent)"
             }
@@ -251,13 +287,15 @@ public enum BotTimeline {
                 id: "run-\(run.id)", author: .bot, date: run.finishedAt ?? run.startedAt, text: text,
                 failed: run.status == .failed)
         }
-        if let today, !today.summary.isEmpty {
+        if let today, !today.summary.isEmpty || todos.contains(where: { calendar.isDate($0.createdAt, inSameDayAs: now) }) {
             // The summary comes from today's digests, so it is as new as the newest of them.
             let written = digests.filter { $0.date == today.date }.map(\.createdAt).max()
             messages.append(
                 BotMessage(
                     id: "summary-\(today.date)", author: .bot, date: written ?? now, title: "今天的总结",
-                    text: today.summary))
+                    text: today.summary, todos: todos.filter {
+                        calendar.isDate($0.createdAt, inSameDayAs: now) && $0.status != .deleted && $0.status != .cancelled
+                    }))
         }
         return messages
     }
@@ -269,18 +307,34 @@ public enum BotTimeline {
         return messages.filter { $0.author == .bot && $0.date > since }.count
     }
 
-    /// The messages of the last `days` days that have any (oldest first), and how many earlier
-    /// days are left out. The page opens on the face and the cards, so the chat below them
-    /// starts with the latest days instead of a week of history to scroll through.
-    public static func recent(_ messages: [BotMessage], days: Int, calendar: Calendar)
-        -> (messages: [BotMessage], hiddenDays: Int)
+    /// Today's messages and those of the `earlier` latest days before today that have any
+    /// (oldest first), and the earlier days still left out, newest first. The page opens on
+    /// the face, the cards and today; each tap on the button above brings back one more day.
+    public static func recent(_ messages: [BotMessage], earlier: Int, now: Date, calendar: Calendar)
+        -> (messages: [BotMessage], hidden: [Date])
     {
+        let today = calendar.startOfDay(for: now)
         let starts = messages.map { calendar.startOfDay(for: $0.date) }
-        let distinct = Array(Set(starts)).sorted(by: >)
-        guard days > 0, distinct.count > days else { return (messages, 0) }
-        let cutoff = distinct[days - 1]
-        let shown = zip(messages, starts).filter { $0.1 >= cutoff }.map(\.0)
-        return (shown, distinct.count - days)
+        let before = Array(Set(starts.filter { $0 < today })).sorted(by: >)
+        let shown = Set(before.prefix(max(earlier, 0)))
+        let kept = zip(messages, starts).filter { $0.1 >= today || shown.contains($0.1) }.map(\.0)
+        return (kept, Array(before.dropFirst(max(earlier, 0))))
+    }
+
+    /// Whether a message shows its Bot's face, name and time above it: not when it follows
+    /// another of the Bot's own (not a failure) on the same day within 10 minutes.
+    public static func startsGroup(at index: Int, in messages: [BotMessage], calendar: Calendar) -> Bool {
+        guard index > 0, index < messages.count else { return true }
+        let message = messages[index], previous = messages[index - 1]
+        guard message.author == .bot, previous.author == .bot, !previous.failed else { return true }
+        return !calendar.isDate(message.date, inSameDayAs: previous.date)
+            || message.date.timeIntervalSince(previous.date) > 600
+    }
+
+    /// When a Bot last spoke, beside its row in the Bot list: 09:41 today, 昨天, or 10月21日.
+    public static func listTime(_ date: Date, now: Date, calendar: Calendar) -> String {
+        if calendar.isDate(date, inSameDayAs: now) { return DueText.format(date, "HH:mm", calendar) }
+        return day(date, now: now, calendar: calendar)
     }
 
     /// The divider above a day's first message: 今天, 昨天 or 10月21日.
@@ -298,13 +352,29 @@ public enum BotTimeline {
 /// A Bot's chat (`/api/v1/bots/{bot_id}/messages`) as bubbles. A pending reply has no bubble:
 /// the page shows the typing indicator instead. A failed one becomes a small note.
 public enum BotChat {
+    /// Only today's latest ready Bot line, while visible, may offer replies.
+    public static func replyQuestion(
+        _ chat: [ChatMessage], visible: [BotMessage]? = nil,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> ChatMessage? {
+        guard let latest = chat.max(by: {
+            $0.createdAt == $1.createdAt ? $0.updatedAt < $1.updatedAt : $0.createdAt < $1.createdAt
+        }), latest.author == .bot, latest.status == .ready,
+            let replies = latest.replies, !replies.isEmpty,
+            calendar.isDate(latest.updatedAt, inSameDayAs: now)
+        else { return nil }
+        if let visible, !visible.contains(where: { $0.id == latest.id }) { return nil }
+        return latest
+    }
+
     public static func messages(_ chat: [ChatMessage]) -> [BotMessage] {
         chat.compactMap { line in
             switch (line.author, line.status) {
             case (.me, _):
                 return BotMessage(id: line.id, author: .me, date: line.createdAt, text: line.text)
             case (.bot, .ready):
-                return BotMessage(id: line.id, author: .bot, date: line.updatedAt, text: line.text)
+                return BotMessage(
+                    id: line.id, author: .bot, date: line.updatedAt, text: line.text, cards: line.cards ?? [])
             case (.bot, .pending):
                 return nil
             case (.bot, .failed):

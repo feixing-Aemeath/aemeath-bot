@@ -4,22 +4,26 @@
 
     /// What the right side of the Mac window shows; the App reopens the last one.
     enum MacSelection: Hashable {
+        case dashboard
         case bot(String)
         case settings
 
         static let defaultsKey = "assistant.mac.selection"
 
-        /// `settings` or a Bot's id, as kept in UserDefaults. The knowledge base had a page of its
-        /// own, kept as `knowledge`: that is now 知识库Bot's id, whose page opens it.
+        /// `dashboard`, `settings` or a Bot's id, as kept in UserDefaults; nothing kept yet is the
+        /// dashboard. The knowledge base had a page of its own, kept as `knowledge`: that is now
+        /// 知识库Bot's id, whose page opens it.
         init(stored: String?) {
             switch stored {
             case "settings": self = .settings
-            default: self = .bot(stored ?? Bot.assistantID)
+            case DashboardPage.id, nil: self = .dashboard
+            case let id?: self = .bot(id)
             }
         }
 
         var stored: String {
             switch self {
+            case .dashboard: return DashboardPage.id
             case .bot(let id): return id
             case .settings: return "settings"
             }
@@ -33,10 +37,11 @@
         var location: CGPoint?
     }
 
-    /// The Mac main window: the Bots on the left (the assistant first, then the characters, then
-    /// below a line 知识库Bot, then the message sources) with settings at the bottom; on the right, the chosen Bot's page on
-    /// a lighter background.
+    /// The Mac main window: on the left 仪表盘, then the Bots (the assistant first, then the
+    /// characters, then below a line 知识库Bot, then the message sources) with settings at the
+    /// bottom; on the right, the dashboard or the chosen Bot's page on a lighter background.
     public struct MacRootView: View {
+        @AppStorage("assistant.mac.cardsPanel") private var cardsShown = true
         @EnvironmentObject private var store: AppStore
         @State private var selection: MacSelection? = MacSelection(
             stored: UserDefaults.standard.string(forKey: MacSelection.defaultsKey))
@@ -62,6 +67,7 @@
                 .toolbarBackground(.hidden, for: .windowToolbar)
             }
             .environment(pointer)
+            .tint(Palette.clay)
             .onContinuousHover(coordinateSpace: .global) { phase in
                 switch phase {
                 case .active(let location): pointer.location = location
@@ -84,18 +90,24 @@
         @ViewBuilder var detail: some View {
             let bots = store.bots
             switch selection {
+            case .dashboard, nil:
+                DashboardPage(
+                    openBot: { selection = .bot($0) },
+                    openCards: { cardsShown = true; selection = .bot($0) },
+                    openSettings: { selection = .settings })
+                    .navigationTitle(DashboardPage.title)
+                    .hiddenWindowTitle()
+                    .toolbar { RefreshButton() }
             case .settings:
                 MacSettingsPage { id in selection = .bot(id) }
             case .bot(let id):
                 // A plugin that went away shows the assistant; while the plugins still load, the
                 // page waits rather than flashing the assistant.
-                if let bot = bots.first(where: { $0.id == id }) ?? (store.settled ? bots[0] : nil) {
-                    MacBotPage(bot: bot).id(bot.id)
+                if let bot = bots.first(where: { $0.id == id }) ?? (store.settled ? bots.first(where: \.isAssistant) : nil) {
+                    MacBotPage(bot: bot, cardsShown: $cardsShown).id(bot.id)
                 } else {
                     Palette.page
                 }
-            case nil:
-                MacBotPage(bot: bots[0]).id(bots[0].id)
             }
         }
     }
@@ -124,34 +136,11 @@
 
         var body: some View {
             let bots = store.bots
-            let sources = bots.filter { $0.kind == .source }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    SidebarHeader(title: "Bots")
-                    ForEach(bots.filter { $0.kind == .assistant || $0.kind == .character }) { bot in
-                        row(bot)
-                    }
-                    let shelf = bots.filter { $0.kind == .knowledge }
-                    if !shelf.isEmpty {
-                        // A line between the Bots of the day and the one who keeps the knowledge base.
-                        Palette.hairline
-                            .frame(height: 1)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                        ForEach(shelf) { bot in
-                            row(bot)
-                        }
-                    }
-                    if !sources.isEmpty {
-                        SidebarHeader(title: "消息来源").padding(.top, 12)
-                        ForEach(sources) { bot in
-                            row(bot)
-                        }
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-            }
+            BotSidebarList {
+                SidebarItem(selected: selection == .dashboard) {
+                    selection = .dashboard
+                } label: { DashboardRow() }
+            } row: { row($0) }
             .safeAreaInset(edge: .bottom) {
                 SidebarFooter(selection: $selection)
             }
@@ -171,7 +160,7 @@
         }
 
         func move(_ step: Int, among bots: [Bot]) -> KeyPress.Result {
-            let choices = bots.map { MacSelection.bot($0.id) }
+            let choices = [MacSelection.dashboard] + bots.map { MacSelection.bot($0.id) }
             guard !choices.isEmpty else { return .ignored }
             let index = selection.flatMap { choices.firstIndex(of: $0) } ?? -step
             selection = choices[min(max(index + step, 0), choices.count - 1)]

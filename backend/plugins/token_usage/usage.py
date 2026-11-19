@@ -249,8 +249,8 @@ class Ledger:
         """The part of the month you used yourself, read from the CLIs' session files."""
         return self.month_card(own=True, title="本月自己用的")
 
-    def chart_card(self):
-        days = [self.today - timedelta(days=n) for n in range(CHART_DAYS - 1, -1, -1)]
+    def chart_card(self, count=CHART_DAYS):
+        days = [self.today - timedelta(days=n) for n in range(count - 1, -1, -1)]
 
         # Thousands, or millions once a day reaches ten million.
         peak = max(self.total(d, d) for d in days)
@@ -262,11 +262,34 @@ class Ledger:
                 for d in days
             ]
 
-        title = f"最近 {CHART_DAYS} 天消耗"
+        title = f"最近 {count} 天消耗"
         if not self.has_own:
             return card("chart", title, kind="line", unit=unit, points=points())
         series = [{"name": name, "points": points(own)} for name, own in SERIES]
         return card("chart", title, kind="line", unit=unit, series=series)
+
+    def agents_card(self, count):
+        """A ring of the last `count` days' tokens by Agent (both what the assistant ran and what
+        you used yourself); None when there were none."""
+        first = self.today - timedelta(days=count - 1)
+        parts = [
+            (name, n)
+            for harness, name in HARNESSES.items()
+            if (n := self.total(first, self.today, harness))
+        ]
+        total = sum(n for _, n in parts)
+        if not total:
+            return None
+        return card(
+            "chart",
+            f"最近 {count} 天各 Agent 的用量",
+            kind="donut",
+            unit="tokens",
+            value=short(total),
+            points=[
+                {"x": name, "y": round(n / 1_000_000, 2), "label": short(n)} for name, n in parts
+            ],
+        )
 
     # Daily summary
 

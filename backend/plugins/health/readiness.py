@@ -109,7 +109,11 @@ def sleep_part(analyzer, day):
 
 def training_part(analyzer, day):
     daily = {
-        d: (row["metrics"].get("trimp", {}).get("value") if row else None)
+        d: (
+            row["metrics"]["trimp"].get("value")
+            if row and row["metrics"].get("trimp", {}).get("quality") == "ok"
+            else None
+        )
         for d, row in analyzer.rows.items()
     }
     # Load up to yesterday: readiness describes the state going into the day, so it does not

@@ -4,6 +4,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
 
 @Serializable
 data class KnowledgeReader(val id: String, val kind: String, val sticker: String? = null)
@@ -120,6 +122,11 @@ data class KnowledgeSearchResult(
 data class KnowledgeSearchPage(val results: List<KnowledgeSearchResult>)
 
 object Knowledge {
+    // Finish the current read, then process the most recent refresh request.
+    suspend fun refresh(revisions: Flow<Long>, load: suspend () -> Unit) {
+        revisions.conflate().collect { load() }
+    }
+
     fun validTopic(name: String): Boolean {
         val n = name.trim()
         return n.codePointCount(0, n.length) in 1..40 && !n.startsWith('.') && n != "整理" && n.none { it in "/\\:" }

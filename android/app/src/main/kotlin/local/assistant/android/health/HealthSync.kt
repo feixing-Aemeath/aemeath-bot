@@ -25,6 +25,9 @@ class HealthSync(private val context: Context) {
 
     private fun client() = HealthConnectClient.getOrCreate(context)
 
+    // The switch stops every upload that starts by itself; 立即上传 always works.
+    internal fun canSync(automatic: Boolean) = !device.mock && !device.tablet && (!automatic || device.healthEnabled)
+
     private fun supports(c: HealthConnectClient, feature: Int) =
         c.features.getFeatureStatus(feature) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
 
@@ -69,8 +72,9 @@ class HealthSync(private val context: Context) {
     }
 
     suspend fun sync(force: Boolean, background: Boolean): Boolean = withContext(Dispatchers.IO) {
+        val automatic = background || !force
         lock.withLock {
-            if (device.mock || !device.healthEnabled || availability != HealthConnectClient.SDK_AVAILABLE)
+            if (!canSync(automatic) || availability != HealthConnectClient.SDK_AVAILABLE)
                 return@withLock true
             if (!force && System.currentTimeMillis() - device.healthLast < 300000) return@withLock true
             try {
@@ -95,7 +99,7 @@ class HealthSync(private val context: Context) {
                 val api = LiveBackend(endpoint, { token })
                 val now = Instant.now()
                 var sent = 0
-                fun stillConnected() = !device.mock && device.healthEnabled && !device.tablet &&
+                fun stillConnected() = canSync(automatic) &&
                     device.baseUrl == endpoint && device.token() == token
                 suspend fun <T : Record> syncType(type: KClass<T>) {
                     if (HealthPermission.getReadPermission(type) !in granted) return

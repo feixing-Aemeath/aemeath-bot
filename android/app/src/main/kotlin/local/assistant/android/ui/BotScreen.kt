@@ -152,14 +152,15 @@ internal fun BotPage(
 ) {
     var cardsShown by rememberSaveable { mutableStateOf(true) }
     var draft by rememberSaveable { mutableStateOf("") }
-    var days by rememberSaveable { mutableIntStateOf(2) }
+    var loadingEarlier by remember(bot.id) { mutableStateOf(false) }
+    var earlier by rememberSaveable { mutableIntStateOf(0) }
     var editing by remember { mutableStateOf<Todo?>(null) }
     var deleting by remember { mutableStateOf<Todo?>(null) }
     var sending by remember { mutableStateOf(false) }
     val scroll = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val messages = model.messages(bot)
-    val recent = BotTimeline.recent(messages, days, model.zone)
+    val recent = BotTimeline.recent(messages, earlier, s.clock, model.zone)
     val state = model.botState(bot)
     val cards = bot.pluginIds.flatMap { s.cards[it].orEmpty() }
         .filterNot { bot.id == "health" && it.type == "text" }
@@ -398,14 +399,29 @@ internal fun BotPage(
                         }
                     }
                     item("wave") { WaveDivider() }
-                    if (recent.second > 0) item {
-                        TextButton(onClick = { days += 3 }, modifier = Modifier.fillMaxWidth()) {
-                            Muted("更早的消息（还有 ${recent.second} 天）")
+                    BotTimeline.earlierLabel(recent.second, s.clock, model.zone)?.let { label ->
+                        item("earlier") {
+                            TextButton(onClick = { earlier += 1 }, modifier = Modifier.fillMaxWidth()) {
+                                Muted(label)
+                            }
                         }
                     }
-                    if (messages.isEmpty()) item {
+                    if (s.chats[bot.id].orEmpty().size < (s.chatTotals[bot.id] ?: 0)) item("load-earlier") {
+                        TextButton(
+                            onClick = {
+                                loadingEarlier = true
+                                scope.launch {
+                                    try { model.loadChat(bot.id, earlier = true) }
+                                    finally { loadingEarlier = false }
+                                }
+                            },
+                            enabled = !loadingEarlier,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Muted(if (loadingEarlier) "读取中…" else "读取更早的消息") }
+                    }
+                    if (recent.first.isEmpty()) item("empty") {
                         Muted(
-                            "${bot.name} 还没有说过话。",
+                            if (recent.second.isEmpty()) "${bot.name} 还没有说过话。" else "今天还没有新消息。",
                             Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 24.dp)
@@ -445,8 +461,11 @@ internal fun BotPage(
                 val typed = draft
                 sending = true
                 scope.launch {
-                    if (model.send(bot, typed)) draft = ""
-                    sending = false
+                    try {
+                        sendDraft(typed, { draft }, { draft = "" }) { model.send(bot, it) }
+                    } finally {
+                        sending = false
+                    }
                 }
             }
         }
@@ -597,7 +616,7 @@ private fun MessageBubble(
         ) {
             m.title?.let { Serif(it, 16) }
             MarkdownText(m.text)
-            m.todos.forEach { todo ->
+            m.todos.filter { it.visible }.forEach { todo ->
                 TodoRow(
                     todo,
                     { onEdit(todo) },

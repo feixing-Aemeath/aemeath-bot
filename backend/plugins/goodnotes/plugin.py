@@ -129,9 +129,10 @@ class Plugin(BasePlugin):
                     self.record(relative, topic, "waiting", at)
                 elif topic is None:
                     self.record(relative, None, "unmapped", at, UNMAPPED)
-                elif not self.unchanged(relative, topic, signature(stat)):
+                else:
                     try:
-                        self.copy(source, relative, topic, at)
+                        if not self.unchanged(relative, topic, signature(stat)):
+                            self.copy(source, relative, topic, at)
                     except ValueError:
                         self.record(relative, topic, "conflict", at, "目标路径无效或包含符号链接")
         for row in self.db.rows("SELECT path FROM goodnotes_files"):

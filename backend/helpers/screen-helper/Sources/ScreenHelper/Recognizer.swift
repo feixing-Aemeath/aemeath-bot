@@ -49,7 +49,8 @@ extension String {
     /// not count.
     var matchKey: String {
         precomposedStringWithCompatibilityMapping.lowercased().unicodeScalars
-            .filter { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0) && !CharacterSet.symbols.contains($0) }
+            .filter { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0) && !CharacterSet.symbols.contains($0) && $0.properties.generalCategory != .format
+                && !(0xFE00...0xFE0F).contains($0.value) && !(0xE0100...0xE01EF).contains($0.value) }
             .map(String.init).joined()
     }
 }

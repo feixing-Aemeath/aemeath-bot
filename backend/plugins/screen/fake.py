@@ -49,7 +49,7 @@ class FakeScreenCapture:
 
     async def preview(self):
         self.operations.append(("preview",))
-        path = "fake/preview.png"
+        path = self.document.get("preview", {}).get("path") or "fake/preview.png"
         self.recognizer.register(path, self.document.get("preview", {}).get("blocks", []))
         return Screenshot(path, "preview", self.captured_at)
 
@@ -58,7 +58,8 @@ class FakeScreenCapture:
         frames = self.document["chats"][chat]["frames"]
         last = len(frames) - 1
         index = min(page, last)
-        path = f"fake/{chat}/{index}.png"
+        # A frame may name a real image file, for checks that read the pixels.
+        path = frames[index].get("path") or f"fake/{chat}/{index}.png"
         self.recognizer.register(path, frames[index]["blocks"])
         return Screenshot(
             path,

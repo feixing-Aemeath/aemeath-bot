@@ -3,20 +3,22 @@
     import SwiftUI
     import UIKit
 
-    /// One Bot on the iPhone, as on the Mac: its face on top, its cards, the wavy line with the
-    /// paper plane, then what it said like a chat, and a box at the bottom to write to it (message
-    /// sources only read, so they have none). The grip above the line folds the cards away. The
-    /// only button on top opens the Bots; a plugin's switch and facts and the Agent's runs are in
-    /// 设置.
+    /// One Bot on the iPhone, as on the Mac: its face on top, the wavy line with the paper plane,
+    /// then what it said like a chat, and a box at the bottom to write to it (message sources only
+    /// read, so they have none). The page opens at the newest line. The button on the left opens
+    /// the Bots; the one on the right brings up the Bot's cards in a sheet (all of them together
+    /// are on 仪表盘). A plugin's switch and facts and the Agent's runs are in 设置.
     struct PhoneBotPage: View {
         @EnvironmentObject private var store: AppStore
         let bot: Bot
+        @Binding var cardsShown: Bool
         let openBots: () -> Void
-        @State private var cardsShown = true
         @State private var draft = ""
         /// What the face on top acts out: hello when the page opens, nodding when the Bot says
         /// something.
         @State private var cue: MascotCue?
+        /// The header has scrolled up under the bar: the bar shows the Bot's name instead.
+        @State private var heroHidden = false
 
         static let bottom = "bottom"
 
@@ -27,13 +29,14 @@
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         PhoneBotHero(bot: bot, status: store.statusLine(bot), cue: cue)
-                        if cardsShown {
-                            VStack(alignment: .leading, spacing: 12) {
-                                BotCards(bot: bot, minWidth: 300)
+                            .onGeometryChange(for: Bool.self) { $0.frame(in: .scrollView).maxY < 12 } action: { hidden in
+                                withAnimation(.easeOut(duration: 0.18)) { heroHidden = hidden }
                             }
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        OfflineBanner()
+                        if bot.isAssistant {
+                            AgentBanner()
+                            SharePendingNotice()
                         }
-                        CardsHandle(shown: $cardsShown, count: BotCards.count(of: bot, in: store))
                         WavyDivider(tint: bot.accent)
                         ChatTimeline(bot: bot)
                         Color.clear.frame(height: 1).id(Self.bottom)
@@ -41,18 +44,31 @@
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
                 }
+                .modifier(ChatScrollAnchor())
                 .scrollDismissesKeyboard(.interactively)
                 .refreshable { await store.refresh() }
                 .background(Palette.page)
                 .safeAreaInset(edge: .bottom) { input }
                 .onChange(of: store.chats[bot.id]?.count) { old, new in
-                    // Down to a new line, not when the chat first loads: the page opens at the
-                    // top, with the face and the cards.
-                    guard let old, let new, new > old else { return }
-                    withAnimation { proxy.scrollTo(Self.bottom, anchor: .bottom) }
+                    guard let new else { return }
+                    // The chat came in after the page opened: down to its newest line at once;
+                    // a new line afterwards: down to it smoothly.
+                    if let old {
+                        guard new > old else { return }
+                        withAnimation { proxy.scrollTo(Self.bottom, anchor: .bottom) }
+                    } else {
+                        proxy.scrollTo(Self.bottom, anchor: .bottom)
+                    }
                 }
             }
-            .navigationTitle(bot.name)
+            .environment(\.openBotCards) {
+                hideKeyboard()
+                cardsShown = true
+            }
+            .inspector(isPresented: $cardsShown) {
+                BotCardsPanel(bot: bot, shown: $cardsShown)
+            }
+            .navigationTitle(store.displayName(bot))
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Palette.page, for: .navigationBar)
             .toolbar {
@@ -60,7 +76,28 @@
                     Button(action: openBots) {
                         Image(systemName: "line.3.horizontal")
                     }
+                    .tint(.primary)
                     .accessibilityLabel("所有 Bot")
+                }
+                // The name is in the header; the bar repeats it, small with the face, only once
+                // the header has scrolled away.
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 7) {
+                        BotAvatar(bot: bot).frame(width: 24, height: 24)
+                        Text(store.displayName(bot)).font(Typography.serif(17))
+                    }
+                    .opacity(heroHidden ? 1 : 0)
+                    .accessibilityHidden(!heroHidden)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        hideKeyboard()
+                        cardsShown = true
+                    } label: {
+                        Image(systemName: "square.grid.2x2")
+                    }
+                    .tint(.primary)
+                    .accessibilityLabel("\(store.displayName(bot)) 的卡片")
                 }
             }
             .onAppear {
@@ -73,11 +110,10 @@
                     cue = MascotCue(.talk)
                 }
             }
-            // On opening, when the plugin is switched, and after every refresh of the App.
+            // On opening, when the plugin is switched, and after every refresh of the App; nothing
+            // to do when /today brought every plugin's cards.
             .task(id: CardsLoad(state: plugin?.state, refreshed: store.lastRefresh, plugins: bot.pluginIDs)) {
-                for id in bot.pluginIDs {
-                    await store.loadCards(id)
-                }
+                await store.loadCards(of: [bot])
             }
             .task {
                 await store.loadChat(bot)
@@ -90,11 +126,12 @@
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Palette.page)
+                    .padding(.top, 18)
+                    .padding(.bottom, 10)
+                    .background(PageFade())
             } else {
                 ChatInput(
-                    placeholder: store.isReplying(bot) ? "\(bot.name) 正在回复…" : "给 \(bot.name) 发消息",
+                    placeholder: store.isReplying(bot) ? "\(store.displayName(bot)) 正在回复…" : "给 \(store.displayName(bot)) 发消息",
                     text: $draft, disabled: store.isReplying(bot),
                     returnSends: UIDevice.current.userInterfaceIdiom == .pad, inset: 12
                 ) {
@@ -102,75 +139,92 @@
                     draft = ""
                     cue = MascotCue(.greet)
                     Task {
-                        await store.send(text, to: bot)
-                        if store.message != nil { draft = text }  // not sent: keep it
+                        let sent = await store.send(text, to: bot)
+                        if !sent, draft.isEmpty { draft = text }  // not sent: keep it
                     }
                 }
             }
         }
     }
 
-    /// The top of a Bot's page, as in the sketch: its face in a round frame of its color in the
-    /// middle, then its name, what it looks after and how it is doing. The face is alive: it
-    /// blinks, plays when tapped and nods on `cue`.
+    /// The top of a Bot's page, compact like a profile row: its face in a round frame of its
+    /// color on the left; its name with what it looks after beside it, and how it is doing
+    /// under them; the assistant's 立即提炼 on the right. The face is alive: it blinks, plays
+    /// when tapped and nods on `cue`; what an animation raises (an umbrella, Zzz) may leave the
+    /// circle at the top. Scrolled away, the bar shows the name instead.
     struct PhoneBotHero: View {
         @EnvironmentObject private var store: AppStore
         let bot: Bot
         let status: String
         var cue: MascotCue?
 
-        static let side: CGFloat = 116
+        static let side: CGFloat = 64
 
         var body: some View {
             let state = store.botState(bot)
-            VStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 14) {
                 face(state)
-                    .padding(.top, 8)
-                Text(bot.name)
-                    .font(Typography.serif(24))
-                Text(bot.tag)
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(bot.accent)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(bot.accent.opacity(0.16)))
-                HStack(spacing: 6) {
-                    StatusDot(color: state.color)
-                    Text(status)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
+                VStack(alignment: .leading, spacing: 5) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .center, spacing: 8) { name; tag }
+                        VStack(alignment: .leading, spacing: 4) { name; tag }
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        if let color = state.dotColor { StatusDot(color: color) }
+                        Text(status)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    .font(.footnote)
                 }
-                .font(.footnote)
+                Spacer(minLength: 0)
+                if bot.isAssistant { RunNowChip() }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.bottom, 4)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
+        }
+
+        var name: some View {
+            Text(store.displayName(bot))
+                .font(Typography.serif(26))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .accessibilityAddTraits(.isHeader)
+        }
+
+        var tag: some View {
+            Text(bot.tag)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(bot.accentText)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(bot.accent.opacity(0.14)))
         }
 
         @ViewBuilder func face(_ state: MascotState) -> some View {
             if bot.kind == .source {
                 BotAvatar(bot: bot)
-                    .frame(width: Self.side * 0.8, height: Self.side * 0.8)
+                    .frame(width: Self.side, height: Self.side)
             } else {
+                // Zoomed on the face, the same size for every character (as in the Bot list).
+                let place = FacePlacement.hero(bot.look.resolved(in: .main), side: Self.side)
                 MascotView(
                     look: bot.look, state: state, since: bot.isAssistant ? store.stateSince : Date(),
                     cue: cue, interactive: true, characterAnimations: true
                 )
-                // The head fills the circle and is cut round by it at the bottom, like an
-                // avatar; what an animation raises above it (an umbrella, Zzz, numbers) may
-                // leave the circle.
-                .frame(width: Self.side * 1.2, height: Self.side * 1.2)
-                .offset(y: Self.side * 0.06)
+                .frame(width: place.drawn, height: place.drawn)
+                .position(place.center)
                 .frame(width: Self.side, height: Self.side)
                 .mask(OpenTopCircle())
                 .background(
                     Circle().fill(
                         LinearGradient(
-                            colors: [bot.accent.opacity(0.26), bot.accent.opacity(0.08)],
+                            colors: [bot.accent.opacity(0.24), bot.accent.opacity(0.08)],
                             startPoint: .topLeading, endPoint: .bottomTrailing))
                 )
-                .overlay(Circle().stroke(bot.accent.opacity(0.45), lineWidth: 1.5))
-                .accessibilityLabel(bot.name)
+                .overlay(Circle().stroke(bot.accent.opacity(0.4), lineWidth: 1))
+                .accessibilityLabel(store.displayName(bot))
             }
         }
     }

@@ -16,10 +16,10 @@ import re
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from core.apple import APP_ONLY
-from core.message_signals import redact_self
+from core.message_signals import redact_self, redact_todo
 from core.store import todo_row
 
+SYSTEM_ALERT_SOURCES = {"watchdog"}
 FOLDER = "每日"
 NOTES = "## 笔记"
 NOTES_HINT = "（Bot 和你写在这一节，后台重新整理时不会改动。）"
@@ -35,12 +35,14 @@ def day_title(day):
 
 
 def keep_notes(old, generated):
-    """The new file: what the backend writes, then the old file's 「## 笔记」 section."""
+    """The new file: what the backend writes, then the old file's 「## 笔记」 section. Generated text
+    never holds that exact heading, so the first one in the file is always the section."""
     notes = f"{NOTES}\n\n{NOTES_HINT}\n"
     if old:
         index = old.find(f"\n{NOTES}\n")
         if index >= 0:
             notes = old[index + 1 :]
+    generated = re.sub(rf"^{NOTES}[ \t]*$", f"#{NOTES}", generated, flags=re.MULTILINE)
     return f"{generated.rstrip()}\n\n{notes}"
 
 
@@ -65,7 +67,8 @@ class DailyNotes:
     def bounds(self, day):
         """The local day as UTC ISO times, the form every stored time has (core.store.stamp)."""
         start = datetime.combine(day, time(), self.zone).astimezone(UTC)
-        return start.isoformat(), (start + timedelta(days=1)).isoformat()
+        end = datetime.combine(day + timedelta(days=1), time(), self.zone).astimezone(UTC)
+        return start.isoformat(), end.isoformat()
 
     def on(self, value, day):
         return value is not None and self.local(value).date() == day
@@ -117,24 +120,30 @@ class DailyNotes:
         return "\n".join(lines)
 
     def source_name(self, plugin):
+        from core.source_views import SOURCE_NAMES
+
         manifest = self.service.plugins.manifests.get(plugin)
-        return manifest["name"] if manifest else plugin
+        return manifest["name"] if manifest else SOURCE_NAMES.get(plugin, plugin)
 
     # 待办.md ------------------------------------------------------------------------------
 
     def todos(self, day):
         store = self.service.store
-        rows = self.service.db.rows("SELECT * FROM todos WHERE status!='deleted'")
+        rows = self.service.db.rows("SELECT * FROM todos WHERE status IN ('pending','completed')")
         items = store.with_sources([todo_row(r) for r in rows])
+        items = [redact_todo(todo, store.local_identities) for todo in items]
         start = self.bounds(day)[0]
-        due = {"today": [], "overdue": [], "new": [], "done": [], "system": []}
+        due = {"today": [], "overdue": [], "new": [], "done": [], "system": [], "goals": []}
         for todo in sorted(items, key=lambda t: (t["due_at"] is None, t["due_at"] or "")):
             pending = todo["status"] == "pending"
-            if todo["source_plugin"] in APP_ONLY:
+            if SYSTEM_ALERT_SOURCES.intersection(todo["source_plugin"].split(",")):
                 # The watchdog's alerts are not the user's tasks: kept apart, so a Bot does not
                 # list 「课表读不到了」 among the day's deadlines; fixed ones are left out.
                 if pending:
                     due["system"].append(todo)
+            elif "goals" in todo["source_plugin"].split(","):
+                if self.on(todo["due_at"], day):
+                    due["goals"].append(todo)
             elif self.on(todo["due_at"], day):
                 due["today"].append(todo)
             elif pending and todo["due_at"] and todo["due_at"] < start:
@@ -178,6 +187,11 @@ class DailyNotes:
         for title, key in sections:
             if due[key]:
                 lines += ["", f"## {title}", *(self.todo_line(t, day) for t in due[key])]
+        if due["goals"]:
+            lines += ["", "## 今天的目标"]
+            for todo in due["goals"]:
+                box = "[x]" if todo["status"] == "completed" else "[ ]"
+                lines.append(f"- {box} {self.clock(todo['due_at'], True, day)} · {todo['title']}")
         if due["system"]:
             lines += [
                 "",
@@ -196,6 +210,8 @@ class DailyNotes:
             for label, key in (("今天截止", "today"), ("逾期", "overdue"), ("新记下", "new"))
             if due[key]
         ]
+        if due["goals"]:
+            parts.append(f"目标 {len(due['goals'])} 步")
         text = "，".join(parts) if parts else "今天没有要处理的待办"
         if due["system"]:
             text += f"；另有 {len(due['system'])} 条系统提醒（不是待办）"
@@ -257,7 +273,12 @@ class DailyNotes:
         """Write one day's folder; the paths whose content changed."""
         day = day or self.today()
         parts = await self.plugin_parts(day)
-        return await asyncio.to_thread(self._write, day, parts)
+        worker = asyncio.create_task(asyncio.to_thread(self._write, day, parts))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
 
     def _write(self, day, parts):
         due, messages = self.todos(day), self.messages(day)

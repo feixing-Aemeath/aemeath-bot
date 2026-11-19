@@ -61,6 +61,8 @@ data class Todo(
     val sources: List<TodoSource>? = null,
 )
 
+val Todo.visible get() = status != "deleted" && status != "cancelled"
+
 @Serializable
 data class Page<T>(val items: List<T>, val total: Int)
 

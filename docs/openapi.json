@@ -42,6 +42,52 @@
       }
     },
     "/api/v1/todos": {
+      "post": {
+        "summary": "New Todo",
+        "operationId": "new_todo_api_v1_todos_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TodoNew"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Todo"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Pending todo with the same current deduplication key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Todo"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "summary": "Todos",
         "operationId": "todos_api_v1_todos_get",
@@ -56,7 +102,8 @@
                   "enum": [
                     "pending",
                     "completed",
-                    "deleted"
+                    "deleted",
+                    "cancelled"
                   ],
                   "type": "string"
                 },
@@ -115,6 +162,125 @@
         }
       }
     },
+    "/api/v1/inbox": {
+      "post": {
+        "summary": "Inbox",
+        "operationId": "inbox_api_v1_inbox_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/todos/{id}/sources": {
+      "get": {
+        "summary": "Todo Sources",
+        "operationId": "todo_sources_api_v1_todos__id__sources_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoSourceTexts"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stats/extraction": {
+      "get": {
+        "summary": "Extraction",
+        "operationId": "extraction_api_v1_stats_extraction_get",
+        "parameters": [
+          {
+            "name": "weeks",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 26,
+              "minimum": 1,
+              "default": 4,
+              "title": "Weeks"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtractionStats"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/todos/{id}": {
       "patch": {
         "summary": "Update Todo",
@@ -150,6 +316,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Terminal deletion, cancelled todo completed without reopening, or duplicate deduplication key"
           },
           "422": {
             "description": "Validation Error",
@@ -224,6 +393,25 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "Exclusive time/date boundary or next_before cursor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
           }
         ],
         "responses": {
@@ -253,6 +441,7 @@
     "/api/v1/runs": {
       "get": {
         "summary": "Runs",
+        "description": "Successful extract_todos runs count harness attempts only. Omit status to include scheduler runs.",
         "operationId": "runs_api_v1_runs_get",
         "parameters": [
           {
@@ -277,6 +466,82 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "job",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive started_at boundary",
+              "title": "Since"
+            },
+            "description": "Inclusive started_at boundary"
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclusive started_at boundary",
+              "title": "Until"
+            },
+            "description": "Exclusive started_at boundary"
           }
         ],
         "responses": {
@@ -486,6 +751,55 @@
         }
       }
     },
+    "/api/v1/plugins/{id}/open-chat": {
+      "post": {
+        "summary": "Open Chat",
+        "operationId": "open_chat_api_v1_plugins__id__open_chat_post",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenChat"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenChatAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health/samples": {
       "post": {
         "summary": "Health",
@@ -609,6 +923,25 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "Exclusive time/date boundary or next_before cursor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
           }
         ],
         "responses": {
@@ -671,6 +1004,25 @@
               "default": 0,
               "title": "Offset"
             }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "Exclusive time/date boundary or next_before cursor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
           }
         ],
         "responses": {
@@ -727,6 +1079,70 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ChatAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/app/bot-preferences": {
+      "get": {
+        "summary": "Get Bot Preferences",
+        "operationId": "get_bot_preferences_api_v1_app_bot_preferences_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotPreferences"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Bot Preferences",
+        "operationId": "put_bot_preferences_api_v1_app_bot_preferences_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotPreferencesUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotPreferences"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Current preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotPreferences"
                 }
               }
             }
@@ -1216,6 +1632,30 @@
                   "type": "string",
                   "format": "binary"
                 }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
               }
             }
           },
@@ -1283,6 +1723,7 @@
     "/api/v1/videos": {
       "post": {
         "summary": "Add Video",
+        "description": "添加公开视频；重复提交 failed 条目会从头重试，保留原主题。",
         "operationId": "add_video_api_v1_videos_post",
         "requestBody": {
           "required": true,
@@ -1304,6 +1745,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "插件未启用或未完成队列已满（包括失败视频重试）"
           },
           "422": {
             "description": "Validation Error",
@@ -1528,6 +1972,104 @@
         ],
         "title": "Area"
       },
+      "BotPreference": {
+        "properties": {
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned"
+          },
+          "custom_name": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Custom Name"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9.223372036854776e+18,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "visible": {
+            "type": "boolean",
+            "title": "Visible"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "pinned",
+          "custom_name",
+          "visible",
+          "updated_at"
+        ],
+        "title": "BotPreference"
+      },
+      "BotPreferences": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Version"
+          },
+          "entries": {
+            "patternProperties": {
+              "^[a-z][a-z0-9_]{0,63}$": {
+                "$ref": "#/components/schemas/BotPreference"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "maxProperties": 100,
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "entries"
+        ],
+        "title": "BotPreferences"
+      },
+      "BotPreferencesUpdate": {
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expected Version"
+          },
+          "entries": {
+            "patternProperties": {
+              "^[a-z][a-z0-9_]{0,63}$": {
+                "$ref": "#/components/schemas/BotPreference"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "maxProperties": 100,
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_version",
+          "entries"
+        ],
+        "title": "BotPreferencesUpdate"
+      },
       "Card": {
         "properties": {
           "type": {
@@ -1550,6 +2092,17 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Data"
+          },
+          "plugin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plugin"
           }
         },
         "additionalProperties": false,
@@ -1577,6 +2130,51 @@
           "reply"
         ],
         "title": "ChatAccepted"
+      },
+      "ChatCard": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "list",
+              "stat",
+              "chart",
+              "photo_grid",
+              "text",
+              "todo_list"
+            ],
+            "title": "Type"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          },
+          "plugin": {
+            "type": "string",
+            "title": "Plugin"
+          },
+          "taken_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Taken At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "data",
+          "plugin",
+          "taken_at"
+        ],
+        "title": "ChatCard",
+        "description": "A plugin card as it was when a Bot attached it to a reply (chat_reply cards)."
       },
       "ChatMessage": {
         "properties": {
@@ -1629,6 +2227,37 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "replies": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "maxLength": 30,
+                  "minLength": 1
+                },
+                "type": "array",
+                "maxItems": 4
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replies"
+          },
+          "cards": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ChatCard"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cards"
           }
         },
         "additionalProperties": false,
@@ -1647,6 +2276,33 @@
       },
       "ChatPage": {
         "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          },
+          "earlier_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earlier Date"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/ChatMessage"
@@ -1662,6 +2318,9 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "has_more",
+          "next_before",
+          "earlier_date",
           "items",
           "total"
         ],
@@ -1816,6 +2475,33 @@
       },
       "DigestPage": {
         "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          },
+          "earlier_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earlier Date"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/Digest"
@@ -1831,6 +2517,9 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "has_more",
+          "next_before",
+          "earlier_date",
           "items",
           "total"
         ],
@@ -1939,6 +2628,87 @@
           "error"
         ],
         "title": "Entry"
+      },
+      "ExtractionStats": {
+        "properties": {
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractionWeek"
+            },
+            "type": "array",
+            "title": "Weeks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "weeks"
+        ],
+        "title": "ExtractionStats"
+      },
+      "ExtractionWeek": {
+        "properties": {
+          "week_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Week Start"
+          },
+          "caught": {
+            "type": "integer",
+            "title": "Caught"
+          },
+          "with_due": {
+            "type": "integer",
+            "title": "With Due"
+          },
+          "late": {
+            "type": "integer",
+            "title": "Late"
+          },
+          "median_lead_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Lead Hours"
+          },
+          "missed": {
+            "type": "integer",
+            "title": "Missed"
+          },
+          "not_a_todo": {
+            "type": "integer",
+            "title": "Not A Todo"
+          },
+          "recall": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "week_start",
+          "caught",
+          "with_due",
+          "late",
+          "median_lead_hours",
+          "missed",
+          "not_a_todo",
+          "recall"
+        ],
+        "title": "ExtractionWeek"
       },
       "File": {
         "properties": {
@@ -2229,15 +2999,21 @@
             },
             "type": "array",
             "maxItems": 1000,
-            "minItems": 1,
             "title": "Samples"
+          },
+          "deleted": {
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "title": "Deleted"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "samples"
-        ],
         "title": "HealthBatch"
       },
       "HealthReport": {
@@ -2341,6 +3117,33 @@
       },
       "HealthReportPage": {
         "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          },
+          "earlier_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earlier Date"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/HealthReport"
@@ -2356,6 +3159,9 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
+          "has_more",
+          "next_before",
+          "earlier_date",
           "items",
           "total"
         ],
@@ -2412,6 +3218,82 @@
           "source"
         ],
         "title": "HealthSample"
+      },
+      "InboxAccepted": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "job_started": {
+            "type": "boolean",
+            "title": "Job Started"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message_id",
+          "job_started"
+        ],
+        "title": "InboxAccepted"
+      },
+      "InboxItem": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "source_app": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source App"
+          },
+          "chat_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Name"
+          },
+          "missed": {
+            "type": "boolean",
+            "title": "Missed",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "InboxItem"
       },
       "JobAccepted": {
         "properties": {
@@ -2501,6 +3383,25 @@
         "type": "object",
         "title": "KnowledgePatch"
       },
+      "MissedSource": {
+        "properties": {
+          "plugin": {
+            "type": "string",
+            "title": "Plugin"
+          },
+          "chat_name": {
+            "type": "string",
+            "title": "Chat Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "plugin",
+          "chat_name"
+        ],
+        "title": "MissedSource"
+      },
       "Notebook": {
         "properties": {
           "path": {
@@ -2557,6 +3458,40 @@
           "message"
         ],
         "title": "Notebook"
+      },
+      "OpenChat": {
+        "properties": {
+          "chat_name": {
+            "type": "string",
+            "title": "Chat Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chat_name"
+        ],
+        "title": "OpenChat"
+      },
+      "OpenChatAccepted": {
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "const": true,
+            "title": "Accepted",
+            "default": true
+          },
+          "job_started": {
+            "type": "boolean",
+            "title": "Job Started"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "job_started"
+        ],
+        "title": "OpenChatAccepted"
       },
       "Organize": {
         "properties": {
@@ -3474,6 +4409,14 @@
             },
             "type": "array",
             "title": "Cards"
+          },
+          "unsure": {
+            "items": {
+              "$ref": "#/components/schemas/UnsureItem"
+            },
+            "type": "array",
+            "title": "Unsure",
+            "default": []
           }
         },
         "additionalProperties": false,
@@ -3565,7 +4508,8 @@
             "enum": [
               "pending",
               "completed",
-              "deleted"
+              "deleted",
+              "cancelled"
             ],
             "title": "Status"
           },
@@ -3623,6 +4567,42 @@
               }
             ],
             "title": "Sync Error"
+          },
+          "status_source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "reminders"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Source"
+          },
+          "reminder_completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Completed At"
+          },
+          "user_modified_fields": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "title",
+                "due_at",
+                "has_time"
+              ]
+            },
+            "type": "array",
+            "title": "User Modified Fields"
           }
         },
         "additionalProperties": false,
@@ -3641,9 +4621,66 @@
           "created_at",
           "updated_at",
           "sync_status",
-          "sync_error"
+          "sync_error",
+          "status_source",
+          "reminder_completed_at",
+          "user_modified_fields"
         ],
         "title": "Todo"
+      },
+      "TodoNew": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 50000,
+            "title": "Notes",
+            "default": ""
+          },
+          "due_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Due At"
+          },
+          "has_time": {
+            "type": "boolean",
+            "title": "Has Time",
+            "default": false
+          },
+          "missed": {
+            "type": "boolean",
+            "title": "Missed",
+            "default": false
+          },
+          "missed_source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MissedSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "TodoNew"
       },
       "TodoPage": {
         "properties": {
@@ -3724,7 +4761,8 @@
                 "enum": [
                   "pending",
                   "completed",
-                  "deleted"
+                  "deleted",
+                  "cancelled"
                 ]
               },
               {
@@ -3732,6 +4770,39 @@
               }
             ],
             "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "not_a_todo",
+                  "done_elsewhere",
+                  "duplicate",
+                  "wrong_time"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "source_refs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 200,
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Refs"
           }
         },
         "additionalProperties": false,
@@ -3774,6 +4845,64 @@
         "title": "TodoSource",
         "description": "Where one cited message came from, so the App can show the chat and the sender."
       },
+      "TodoSourceText": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "plugin": {
+            "type": "string",
+            "title": "Plugin"
+          },
+          "chat_name": {
+            "type": "string",
+            "title": "Chat Name"
+          },
+          "sender": {
+            "type": "string",
+            "title": "Sender"
+          },
+          "sent_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Sent At"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message_id",
+          "plugin",
+          "chat_name",
+          "sender",
+          "sent_at",
+          "text"
+        ],
+        "title": "TodoSourceText"
+      },
+      "TodoSourceTexts": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TodoSourceText"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "TodoSourceTexts"
+      },
       "TopicCreate": {
         "properties": {
           "name": {
@@ -3803,6 +4932,52 @@
           "name"
         ],
         "title": "TopicCreate"
+      },
+      "UnsureItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "plugin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plugin"
+          },
+          "chat_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Name"
+          },
+          "can_open": {
+            "type": "boolean",
+            "title": "Can Open",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "title": "UnsureItem"
       },
       "ValidationError": {
         "properties": {

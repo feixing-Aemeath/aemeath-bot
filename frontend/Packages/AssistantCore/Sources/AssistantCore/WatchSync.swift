@@ -20,9 +20,15 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
         /// "QQ · 软件工程2班 · 李老师".
         public var source: String
         public var done: Bool
+        /// The deadline itself, so the watch can count down to it and word it afresh hours
+        /// after the snapshot. Nil without a deadline and in snapshots from older iPhone builds.
+        public var dueAt: Date?
+        /// False for a date-only deadline, whose `dueAt` is that day's midnight.
+        public var hasTime: Bool?
 
         public init(
-            id: String, title: String, due: String, overdue: Bool, source: String, done: Bool
+            id: String, title: String, due: String, overdue: Bool, source: String, done: Bool,
+            dueAt: Date? = nil, hasTime: Bool? = nil
         ) {
             self.id = id
             self.title = title
@@ -30,6 +36,8 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
             self.overdue = overdue
             self.source = source
             self.done = done
+            self.dueAt = dueAt
+            self.hasTime = hasTime
         }
     }
 
@@ -39,17 +47,27 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
             public var title: String
             /// "08:00–09:35".
             public var time: String
+            /// The timeline row's note: 「自己的日程」 for what the user put there themselves.
+            public var detail: String?
 
-            public init(title: String, time: String) {
+            public init(title: String, time: String, detail: String? = nil) {
                 self.title = title
                 self.time = time
+                self.detail = detail
             }
+
+            /// Not a class but something of the user's own, which does not 「上课」 or 「下课」.
+            public var isOwnEvent: Bool { detail == "自己的日程" }
 
             /// Start and end in minutes since midnight, from "08:00–09:35".
             public var minutes: (start: Int, end: Int)? {
-                let numbers = time.split { !$0.isNumber }.compactMap { Int($0) }
-                guard numbers.count == 4 else { return nil }
-                return (numbers[0] * 60 + numbers[1], numbers[2] * 60 + numbers[3])
+                let parts = time.split { !$0.isNumber }
+                guard parts.count == 4, let h1 = Int(parts[0]), let m1 = Int(parts[1]),
+                    let h2 = Int(parts[2]), let m2 = Int(parts[3]),
+                    h1 < 24, m1 < 60, m2 < 60, h2 < 24 || (h2 == 24 && m2 == 0)
+                else { return nil }
+                let start = h1 * 60 + m1, end = h2 * 60 + m2
+                return start < end ? (start, end) : nil
             }
         }
 
@@ -70,7 +88,7 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
         /// At `minute` (since midnight): the course going on, else the next one; nil after the
         /// last.
         public func current(atMinute minute: Int) -> Int? {
-            items.firstIndex { ($0.minutes?.end ?? Int.max) > minute }
+            items.firstIndex { $0.minutes.map { $0.end > minute } ?? false }
         }
     }
 
@@ -233,20 +251,29 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
     /// `plugins` give the pages their characters.
     public static func make(
         today: Today?, online: Bool, state: MascotState, now: Date, calendar: Calendar,
-        plugins: [PluginView] = []
+        plugins: [PluginView] = [], updatedAt: Date? = nil
     ) -> WatchSnapshot {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        let day = today.flatMap { formatter.date(from: $0.date) }
+        let cachedDay = day.flatMap { calendar.isDate($0, inSameDayAs: now) ? nil : $0 }
         let items = (today?.todos ?? []).filter { $0.status != .deleted }.map { todo in
             Item(
                 id: todo.id, title: todo.title,
                 due: DueText.describe(todo, now: now, calendar: calendar),
                 overdue: todo.status == .pending
                     && DueText.isOverdue(todo, now: now, calendar: calendar),
-                source: TodoSourceText.describe(todo), done: todo.status == .completed)
+                source: TodoSourceText.describe(todo), done: todo.status == .completed,
+                dueAt: todo.dueAt, hasTime: todo.dueAt == nil ? nil : todo.hasTime)
         }
-        let cards = today?.cards ?? []
+        // Whatever else the watch picks up later, money does not go on a wrist others can see.
+        let cards = (today?.cards ?? []).filter { $0.plugin != "finance" }
         func mascot(_ id: String) -> PluginMascot? { plugins.first { $0.id == id }?.mascot }
         return WatchSnapshot(
-            generatedAt: now, online: online, state: state,
+            generatedAt: updatedAt ?? cachedDay ?? now, online: online, state: state,
             summary: today?.summary ?? "", todos: items,
             courses: courses(in: cards, titled: "今天的课", mascot: mascot("timetable")),
             tomorrowCourses: courses(in: cards, titled: "明天的课", mascot: mascot("timetable")),
@@ -259,7 +286,7 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
         guard let card = cards.first(where: { $0.title.hasPrefix(title) }) else { return nil }
         var items: [Courses.Course] = []
         if case .list(let list) = card.content {
-            items = list.map { Courses.Course(title: $0.title, time: $0.subtitle ?? "") }
+            items = list.map { Courses.Course(title: $0.title, time: $0.subtitle ?? "", detail: $0.detail) }
         }
         return Courses(title: card.title, items: items, mascot: mascot)
     }
@@ -303,6 +330,31 @@ public struct WatchSnapshot: Codable, Equatable, Sendable {
             if done { copy.todos[index].overdue = false }
         }
         return copy
+    }
+
+    /// A new snapshot with what was ticked off in this one still on the list, if it is the same
+    /// day: the iPhone's list only has what is left, and a row should not vanish from under the
+    /// finger as soon as the iPhone confirms it.
+    public func keepingDone(from older: WatchSnapshot, calendar: Calendar) -> WatchSnapshot {
+        guard calendar.isDate(generatedAt, inSameDayAs: older.generatedAt) else { return self }
+        var copy = self
+        copy.todos += older.todos.filter { old in old.done && !todos.contains { $0.id == old.id } }
+        return copy
+    }
+
+    /// Where the watch keeps the latest snapshot: in the App Group, so the complications can
+    /// work out their own timelines from it.
+    public static let defaultsKey = "watch.snapshot"
+
+    public func save(to defaults: UserDefaults) {
+        if let data = try? JSONEncoder.assistant().encode(self) {
+            defaults.set(data, forKey: Self.defaultsKey)
+        }
+    }
+
+    public static func load(from defaults: UserDefaults) -> WatchSnapshot? {
+        guard let data = defaults.data(forKey: defaultsKey) else { return nil }
+        return try? JSONDecoder.assistant().decode(WatchSnapshot.self, from: data)
     }
 
     // WatchConnectivity dictionaries carry the snapshot as JSON data.

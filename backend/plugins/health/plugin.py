@@ -3,7 +3,8 @@ from datetime import date, datetime
 
 from core.plugins import Plugin as BasePlugin
 from core.prompts import render
-from plugins.health.cards import health_cards
+from core.tokens import task_grant
+from plugins.health.cards import TREND_METRICS, health_cards, stages_card, trend_card
 from plugins.health.config import HealthConfig
 from plugins.health.engine import HealthEngine
 from plugins.health.reports import KINDS, ReportConfig, Reports, hours_minutes
@@ -114,6 +115,14 @@ class Plugin(BasePlugin):
                 prompt,
                 succeeded=lambda: self.reports.status(kind, day) == "ready",
                 incomplete_error="report_not_written",
+                grant=task_grant(
+                    f"health:{kind}",
+                    plugin_tools={
+                        ("health", "health_report_input"),
+                        ("health", "health_report_write"),
+                    },
+                    memory_read_paths={self.report_config.goals_path},
+                ),
             )
         except RuntimeError as error:
             row = self.reports.row(kind, day)
@@ -181,6 +190,67 @@ class Plugin(BasePlugin):
 
     async def refresh(self):
         await asyncio.to_thread(self.engine.refresh)
+
+    def charts(self):
+        """Charts 健康Bot can draw into a chat reply, from the same summaries as the cards."""
+        days = {
+            "type": "integer",
+            "minimum": 7,
+            "maximum": 31,
+            "default": 30,
+            "description": "看最近几天（含今天）",
+        }
+        return {
+            "sleep_stages": {
+                "title": "最近几晚的睡眠分期",
+                "description": "每晚深睡、核心、REM、清醒和小睡的小时数，叠成一根柱子",
+                "params": {
+                    "nights": {
+                        "type": "integer",
+                        "minimum": 7,
+                        "maximum": 31,
+                        "default": 14,
+                        "description": "看最近几晚",
+                    }
+                },
+                "build": self.sleep_stages_chart,
+            },
+            "trend": {
+                "title": "一项指标最近几天的走势",
+                "description": "折线图，没有可靠数据的日子跳过",
+                "params": {
+                    "metric": {
+                        "type": "string",
+                        "enum": list(TREND_METRICS),
+                        "default": "sleep",
+                        "description": "、".join(
+                            f"{key} {name}（{unit}）" for key, (name, unit) in TREND_METRICS.items()
+                        ),
+                    },
+                    "days": days,
+                },
+                "build": self.trend_chart,
+            },
+        }
+
+    async def sleep_stages_chart(self, values):
+        def build():
+            if self.engine.data_dates() is None:
+                return None
+            today = self.now().date()
+            return stages_card(self.engine.sleep(today, values["nights"], today=today)["nights"])
+
+        return await asyncio.to_thread(build)
+
+    async def trend_chart(self, values):
+        def build():
+            if self.engine.data_dates() is None:
+                return None
+            today = self.now().date()
+            days = self.engine.daily(today, values["days"], today=today)["days"]
+            return trend_card(days, values["metric"])
+
+        return await asyncio.to_thread(build)
 
     def mcp_tools(self):
         return {

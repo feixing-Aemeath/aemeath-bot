@@ -1,6 +1,7 @@
 """homework, campus and grades: the school plugins behind 作业Bot, 校园Bot and 成绩Bot."""
 
 import json
+import re
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -138,6 +139,46 @@ async def test_homework_without_any_shows_how_it_fills(started):
     plugin = await enable(service, "homework")
     [card] = await plugin.cards()
     assert card["type"] == "text" and "course_chats" in card["data"]["text"]
+
+
+async def test_cancelled_homework_is_absent_from_lists_and_card_counts(started):
+    service, mcp = started
+    plugin = await enable(service, "homework")
+    message = ingest(service, "班级群", "今天交作业", "cancelled")
+    cancelled = add_todo(service, message, "已取消的作业", "今天交作业", NOW, True)
+    add_todo(service, message, "仍需提交的作业", "今天交作业", NOW, True)
+    service.store.update_todo(cancelled["id"], TodoPatch(status="cancelled", notes="老师取消"))
+    assert [t["title"] for t in (await call(mcp, "homework_list", {}))["items"]] == [
+        "仍需提交的作业"
+    ]
+    cards = {card["title"]: card for card in await plugin.cards()}
+    assert cards["最近 4 周的作业"]["data"]["points"][-1]["y"] == 1
+    assert "最近交完的" not in cards
+
+
+async def test_homework_date_only_deadline_lasts_all_day(started):
+    service, _ = started
+    plugin = await enable(service, "homework")
+    message = ingest(service, "班级群", "今天交作业", "date-only")
+    add_todo(service, message, "今天交作业", "今天交作业", "2026-10-21T00:00:00+08:00")
+    add_todo(service, message, "九点交作业", "今天交作业", "2026-10-21T09:00:00+08:00", True)
+    add_todo(service, message, "昨天的作业", "今天交作业", "2026-10-20T00:00:00+08:00")
+    cards = {c["title"]: c for c in await plugin.cards()}
+    stat = cards["这周要交的作业"]["data"]
+    assert stat["value"] == 1
+    assert stat["label"] == "最近一项：今天 · 今天交作业"
+    assert stat["delta"] == "已过截止 2 项"
+    plugin.now = lambda: NOW.replace(day=22)
+    stat = (await plugin.cards())[0]["data"]
+    assert stat["value"] == 0 and stat["delta"] == "已过截止 3 项"
+
+
+async def test_homework_empty_keywords_disables_keyword_matching(started):
+    service, _ = started
+    plugin = await enable(service, "homework", {"keywords": []})
+    message = ingest(service, "班级群", "交作业", "no-keywords")
+    add_todo(service, message, "交作业", "交作业")
+    assert (await plugin.homework_list({}))["items"] == []
 
 
 async def test_campus_events_merge_across_groups_and_leaves_update(started):
@@ -398,3 +439,320 @@ def test_dates_are_utc_in_storage():
         moment({"at": "2026-10-28T08:30:00+08:00"}, "at", ZONE)[0]
         == datetime(2026, 10, 28, 0, 30, tzinfo=UTC).isoformat()
     )
+
+
+@pytest.mark.parametrize("credits", ["-3", "nan", "inf", "31"])
+async def test_grades_csv_rejects_invalid_credits(started, tmp_path, credits):
+    service, _ = started
+    plugin = await enable(service, "grades")
+    sheet = tmp_path / "invalid.csv"
+    sheet.write_text(f"课程,学分,成绩\n离散数学,{credits},90\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="credits"):
+        plugin._import(sheet)
+    assert plugin.rows() == []
+
+
+async def test_grades_zero_credit_courses_do_not_affect_gpa(started, tmp_path):
+    service, _ = started
+    plugin = await enable(service, "grades")
+    sheet = tmp_path / "zero.csv"
+    sheet.write_text("课程,学分,成绩\n讲座,0,100\n", encoding="utf-8")
+    plugin._import(sheet)
+    assert (await plugin.grades_list({}))["gpa"] is None
+    sheet.write_text("课程,学分,成绩\n讲座,0,100\n数学,3,80\n", encoding="utf-8")
+    plugin._import(sheet)
+    assert (await plugin.grades_list({}))["gpa"] == 3.0
+
+
+async def test_grades_unchanged_csv_keeps_release_date(started, tmp_path):
+    service, _ = started
+    plugin = await enable(service, "grades")
+    sheet = tmp_path / "stable.csv"
+    sheet.write_text("课程,学分,成绩\n数学,3,80\n", encoding="utf-8")
+    plugin._import(sheet)
+    recorded = "2026-10-20T02:00:00+00:00"
+    service.db.execute("UPDATE grades SET created_at=?,updated_at=?", (recorded, recorded))
+    plugin._import(sheet)
+    assert plugin.rows()[0]["updated_at"] == recorded
+    assert "这一天出的成绩" not in plugin._daily(NOW.date(), ZONE)["body"]
+    sheet.write_text("课程,学分,成绩\n数学,3,90\n", encoding="utf-8")
+    plugin._import(sheet)
+    assert plugin.rows()[0]["updated_at"] != recorded
+
+
+async def test_grades_csv_keeps_courses_with_different_symbols(started, tmp_path):
+    service, _ = started
+    plugin = await enable(service, "grades")
+    sheet = tmp_path / "symbols.csv"
+    sheet.write_text("课程,学分,成绩\nC++,3,90\nC#,3,80\n", encoding="utf-8")
+    plugin._import(sheet)
+    assert {(r["course"], r["score"]) for r in plugin.rows()} == {("C++", 90), ("C#", 80)}
+    original = {r["course"]: r["id"] for r in plugin.rows()}
+    sheet.write_text("课程,学分,成绩\nｃ＋＋,3,90\nc #,3,80\n", encoding="utf-8")
+    plugin._import(sheet)
+    assert {r["id"] for r in plugin.rows()} == set(original.values())
+    assert (await plugin.grades_list({}))["earned_credits"] == 6
+
+
+async def test_grades_explicit_zero_requirement_overrides_default(started):
+    service, _ = started
+    plugin = await enable(service, "grades", {"comprehensive_required": 60})
+    result = await plugin.grades_score_record({"kind": "综测", "required": 0})
+    assert result["score"]["required"] == 0
+    assert (await plugin.grades_list({}))["scores"]["综测"]["required"] == 0
+
+
+async def test_campus_date_only_event_expires_after_its_local_day(started):
+    service, _ = started
+    plugin = await enable(service, "campus", {"past_days": 0})
+    message = ingest(service, "学院通知群", "今天文体活动", "all-day")
+    await plugin.campus_event_add(
+        {"title": "文体活动", "kind": "文体", "starts_at": "2026-10-21", "source_refs": [message]}
+    )
+    assert len(plugin.events(True, NOW)) == 1
+    assert len(plugin.recommend(NOW)) == 1
+    assert plugin.events(True, NOW.replace(day=22, hour=0)) == []
+
+
+async def test_campus_week_stat_excludes_activities_already_started(started):
+    service, _ = started
+    plugin = await enable(service, "campus")
+    message = ingest(service, "学院通知群", "活动汇总", "started")
+    for title, hour in (("已开始", "09"), ("还没开始", "11")):
+        await plugin.campus_event_add(
+            {"title": title, "starts_at": f"2026-10-21T{hour}:00:00+08:00",
+             "signup_deadline": "2026-10-21", "source_refs": [message]}
+        )  # fmt: skip
+    stat = next(c for c in await plugin.cards() if c["title"] == "这周的活动")["data"]
+    assert stat["value"] == 1
+    assert stat["label"].startswith("1 个还能报名")
+
+
+@pytest.mark.parametrize(
+    "entry,starts,ends,expected",
+    [
+        (
+            ("2026-10-22", "09:00", "10:00", "散步", "自己的日程"),
+            "2026-10-22T09:00:00+08:00",
+            "2026-10-22T10:00:00+08:00",
+            None,
+        ),
+        (
+            ("2026-10-23", "08:00", "09:00", "数学", "课程"),
+            "2026-10-22T23:00:00+08:00",
+            "2026-10-23T10:00:00+08:00",
+            "数学",
+        ),
+        (  # runs over two days: work handed in by a date, not a time to be there
+            ("2026-10-23", "08:00", "09:00", "数学", "课程"),
+            "2026-10-22T20:00:00+08:00",
+            "2026-10-24T22:00:00+08:00",
+            None,
+        ),
+    ],
+)
+async def test_campus_clashes_check_courses_across_all_event_days(
+    started, entry, starts, ends, expected
+):
+    service, _ = started
+    plugin = await enable(service, "campus")
+    with service.db.connect() as conn:
+        conn.executescript(TIMETABLE_SCHEMA)
+        conn.execute("INSERT INTO timetable_weeks VALUES('2026-10-19','2026-10-19T00:00:00+08:00')")
+        conn.execute("INSERT INTO timetable_entries VALUES(?,?,?,?,?)", entry)
+    assert plugin.clash({"starts_at": starts, "ends_at": ends, "has_time": True}, ZONE) == expected
+
+
+# The 第二课堂 site as its student page lists activities (fields as plugins/campus/dekt.py picks
+# them), around NOW.
+DEKT_TALK = {
+    "id": "a1", "name": "人工智能前沿讲座", "start": "2026-10-24 14:00:00",
+    "end": "2026-10-24 16:00:00", "signup_end": "2026-10-23 23:59:00", "place": "图书馆报告厅",
+    "organizer": "信息学院", "module": "科技创新 学习培训",
+}  # fmt: skip
+DEKT_SHOW = {
+    "id": "a2", "name": "校园漫展", "start": "2026-10-23 00:00:00", "end": "2026-10-24 00:00:00",
+    "signup_end": "2026-10-22 23:59:00", "place": "欣苑四楼小礼堂", "organizer": "动漫社",
+    "module": "美育润心 社团活动",
+}  # fmt: skip
+
+
+def test_dekt_replies_and_fields():
+    from plugins.campus import dekt
+
+    with pytest.raises(RuntimeError, match="^chrome_js_disabled$"):
+        dekt.parse(b'{"error": "chrome_js_disabled"}')
+    for reply in (
+        b"<html>",
+        b"[]",
+        b'{"open": []}',
+        b'{"error": "Login page: \\u8bf7\\u767b\\u5f55"}',
+    ):
+        with pytest.raises(RuntimeError, match="^dekt_bad_reply$"):
+            dekt.parse(reply)
+    assert dekt.parse(b'{"open": [], "mine": []}') == {"open": [], "mine": []}
+
+    values = dekt.event_values(DEKT_TALK, ZONE)
+    assert values == {
+        "title": "人工智能前沿讲座",
+        "kind": "讲座",
+        "starts_at": "2026-10-24T06:00:00+00:00",
+        "ends_at": "2026-10-24T08:00:00+00:00",
+        "has_time": 1,
+        "place": "图书馆报告厅",
+        "signup_deadline": "2026-10-23T15:59:00+00:00",
+        "note": "信息学院主办",
+        "credit_kind": "科技创新",
+    }
+    assert dekt.event_values(DEKT_SHOW, ZONE)["kind"] == "文体"
+    assert dekt.event_values({**DEKT_SHOW, "module": "科技创新 社团活动"}, ZONE)["kind"] == "其他"
+    assert dekt.event_values({**DEKT_TALK, "name": " "}, ZONE) is None
+    assert (
+        dekt.event_values({**DEKT_TALK, "start": "待定", "signup_end": None}, ZONE)["starts_at"]
+        is None
+    )
+    assert dekt.ref(DEKT_TALK) == "dekt:a1"
+    assert "signup_block" not in values and "credits" not in values  # not read from its page
+
+    # What the activity's sign-up button says to the user, in fixed words; taking-part credits.
+    def opened(can_enroll, credits=1.0):
+        return dekt.event_values({**DEKT_TALK, "can_enroll": can_enroll, "credits": credits}, ZONE)
+
+    assert (opened("")["signup_block"], opened("")["credits"]) == (None, 1.0)
+    assert opened("报名通过")["signup_block"] is None
+    assert opened("报名对象不符")["signup_block"] == "不在报名范围"
+    assert opened("名额不足")["signup_block"] == "名额已满"
+    assert opened("报名已截止，请联系管理员 13800000000")["signup_block"] == "暂不能报名"
+    assert opened(None)["signup_block"] is None  # its page failed: not hidden
+    assert "credits" not in opened("", 20) and "credits" not in opened("", True)
+
+
+async def test_dekt_fetch_runs_the_fixed_script_in_the_tab(monkeypatch):
+    from core import helper_process
+    from plugins.campus import dekt
+
+    calls = []
+
+    async def run(argv, data, timeout, capture_error=False):
+        calls.append(argv)
+        return replies.pop(0)
+
+    monkeypatch.setattr(helper_process, "run", run)
+    replies = [(0, b'{"open": [], "mine": []}'), (1, b"execution error: (-1743)"), (1, b"other")]
+    assert await dekt.fetch() == {"open": [], "mine": []}
+    osascript, flag, script, tab, page_script = calls[0]
+    assert (osascript, flag, script, tab, page_script) == (
+        "/usr/bin/osascript", "-e", dekt.RUN, "dekt.example.edu.cn/yb/", dekt.SCRIPT
+    )  # fmt: skip
+    # Read-only: the page's list, activity page and 我的活动 requests, nothing that signs up or
+    # cancels.
+    assert set(re.findall(r"'(/[A-Za-z]+/[A-Za-z]+)'", page_script)) == {
+        "/wxController/ActivityForStu",
+        "/wxController/getActivity",
+        "/acinfoService/MyActivity",
+    }
+    for code in ("chrome_automation_denied", "chrome_failed"):
+        with pytest.raises(RuntimeError, match=f"^{code}$"):
+            await dekt.fetch()
+
+
+async def test_campus_reads_signups_and_open_activities_from_dekt(started, monkeypatch):
+    from plugins.campus import dekt
+
+    service, mcp = started
+    plugin = await enable(service, "campus", {"dekt_sync": True})
+    assert set(plugin.jobs()) == {"dekt"}
+    # A QQ notice of the same talk, with the credits it promised.
+    message = ingest(service, "学院通知群", "周六人工智能讲座，加 0.5 分", "e1")
+    await call(
+        mcp,
+        "campus_event_add",
+        {
+            "title": "人工智能前沿讲座",
+            "kind": "讲座",
+            "starts_at": "2026-10-24T14:00:00+08:00",
+            "credits": 0.5,
+            "source_refs": [message],
+        },
+    )
+    other_college = {
+        **DEKT_TALK,
+        "id": "a3",
+        "name": "外院新生寝室设计大赛",
+        "can_enroll": "报名对象不符",
+    }
+    full = {**DEKT_TALK, "id": "a4", "name": "校园寻宝大赛", "can_enroll": "名额不足", "credits": 1}
+    site = {"open": [DEKT_TALK, DEKT_SHOW, other_college, full], "mine": [DEKT_SHOW]}
+
+    async def fetch():
+        return site
+
+    monkeypatch.setattr(dekt, "fetch", fetch)
+    status = await plugin.sync_dekt()
+    assert (status["open"], status["mine"], status["error"]) == (4, 1, None)
+
+    # The one not open to the user is left out; the full one is listed as full.
+    events = {e["title"]: e for e in (await call(mcp, "campus_list", {"what": "events"}))["items"]}
+    assert set(events) == {"人工智能前沿讲座", "校园漫展", "校园寻宝大赛"}
+    assert events["校园寻宝大赛"]["signup_block"] == "名额已满"
+    assert events["校园寻宝大赛"]["credits"] == 1.0
+    del events["校园寻宝大赛"]
+    talk, show = events["人工智能前沿讲座"], events["校园漫展"]
+    assert talk["credits"] == 0.5 and talk["credit_kind"] == "科技创新"  # merged, credits kept
+    assert talk["source_refs"] == [message, "dekt:a1"]
+    assert (
+        talk["signup_deadline"] == "2026-10-23T15:59:00+00:00" and talk["place"] == "图书馆报告厅"
+    )
+    assert talk["signup_status"] is None and show["signup_status"] == "已报名"
+
+    # The one signed up for is not recommended again; it leads the cards.
+    picks = (await call(mcp, "campus_list", {"what": "recommended"}))["items"]
+    assert [p["title"] for p in picks] == ["人工智能前沿讲座"]
+    cards = await plugin.cards()
+    assert [c["title"] for c in cards][:2] == ["我报名的活动", "推荐参加"]
+    assert cards[0]["data"]["items"] == [
+        {"title": "校园漫展", "detail": "已报名", "subtitle": "后天 00:00 · 欣苑四楼小礼堂"}
+    ]
+    daily = await plugin.daily(NOW.date().replace(day=23))
+    assert "校园漫展（文体） · 已报名" in daily["body"]
+
+    recent = next(c for c in cards if c["title"] == "近期活动")["data"]["items"]
+    assert any(i["title"] == "校园寻宝大赛" and "名额已满" in i["subtitle"] for i in recent)
+
+    # Cancelled on the site: no longer marked; a second read changes nothing else.
+    site["mine"] = []
+    await plugin.sync_dekt()
+    show = next(
+        e for e in (await call(mcp, "campus_list", {"what": "events"}))["items"]
+        if e["title"] == "校园漫展"
+    )  # fmt: skip
+    assert show["signup_status"] is None
+    assert len((await call(mcp, "campus_list", {"what": "events"}))["items"]) == 3
+
+
+async def test_dekt_problems_reach_the_runs_once_and_the_watchdog(started, monkeypatch):
+    from plugins.campus import dekt
+
+    service, _ = started
+    plugin = await enable(service, "campus", {"dekt_sync": True})
+
+    async def disabled():
+        raise RuntimeError("chrome_js_disabled")
+
+    monkeypatch.setattr(dekt, "fetch", disabled)
+    with pytest.raises(RuntimeError, match="^chrome_js_disabled$"):
+        await plugin.sync_dekt()
+    await plugin.sync_dekt()  # the same problem again: not another failed run
+    [problem] = await plugin.watch()
+    assert problem["key"] == "dekt" and problem["jobs"] == ["dekt"]
+    assert "允许 Apple 事件中的 JavaScript" in problem["hint"]
+
+    async def leaky():
+        raise RuntimeError("Unexpected token < in JSON at 第二课堂")
+
+    monkeypatch.setattr(dekt, "fetch", leaky)
+    with pytest.raises(RuntimeError, match="^dekt_failed$"):  # page text never reaches runs
+        await plugin.sync_dekt()
+
+    off = await enable(service, "campus", {})
+    assert off.jobs() == {} and await off.watch() == []

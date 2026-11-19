@@ -11,6 +11,14 @@
     extension Bot {
         var accent: Color { look.accent.color }
 
+        /// The accent for small text: darker on the light page, lighter on the dark one, so a
+        /// tag or a section name in it stays readable (the plain accent was about 2.4:1).
+        var accentText: Color {
+            let black = MascotColor(red: 0, green: 0, blue: 0)
+            let white = MascotColor(red: 1, green: 1, blue: 1)
+            return Color(light: look.accent.mixed(with: black, 0.28).rgb, dark: look.accent.mixed(with: white, 0.3).rgb)
+        }
+
         /// The plugin's icon when it is an SF Symbol, else a generic one.
         var symbol: String {
             #if os(macOS)
@@ -19,6 +27,14 @@
                 let known = UIImage(systemName: icon) != nil
             #endif
             return known ? icon : "puzzlepiece.extension"
+        }
+    }
+
+    extension MascotColor {
+        /// 0xRRGGBB, for `Color(light:dark:)`.
+        var rgb: UInt32 {
+            func byte(_ value: Double) -> UInt32 { UInt32((min(max(value, 0), 1) * 255).rounded()) }
+            return byte(red) << 16 | byte(green) << 8 | byte(blue)
         }
     }
 
@@ -53,9 +69,9 @@
                     .background(bot.accent.opacity(0.15))
                     .clipShape(Circle())
                     .overlay(Circle().stroke(bot.accent.opacity(0.45), lineWidth: 1))
-                    if let state {
+                    if let color = state?.dotColor {
                         Circle()
-                            .fill(state.color)
+                            .fill(color)
                             .frame(width: side * 0.3, height: side * 0.3)
                             .overlay(Circle().stroke(Palette.sidebar, lineWidth: 2))
                     }
@@ -100,6 +116,39 @@
                 drawn: drawn,
                 center: CGPoint(
                     x: side / 2 + (0.5 - bounds.midX) * drawn, y: side * 0.56 + (0.5 - bounds.midY) * drawn))
+        }
+
+        /// The face in the iPhone header's circle, for a `MascotView` that plays character
+        /// animations: the head fills the circle, its cut-off bottom at the circle's bottom, and
+        /// its hair may rise past the top.
+        static func hero(_ name: String, side: CGFloat) -> Place {
+            if let eyes = stagedEyes(name) ?? StickerBounds.eyes(of: name) {
+                return place(eyes, side: side, span: 0.32, at: CGPoint(x: 0.5, y: 0.74))
+            }
+            return avatar(name, side: side)
+        }
+
+        /// The character peeking up from the bottom of the Mac header's band, for a `MascotView`
+        /// that plays character animations: the eyes span 30 % of the box, low in it.
+        static func band(_ name: String, side: CGFloat) -> Place {
+            guard let eyes = stagedEyes(name) ?? StickerBounds.eyes(of: name) else {
+                return Place(drawn: side, center: CGPoint(x: side / 2, y: side / 2))
+            }
+            return place(eyes, side: side, span: 0.30, at: CGPoint(x: 0.5, y: 0.8))
+        }
+
+        /// Where the eyes are in a `MascotView` that plays character animations: those draw the
+        /// sticker smaller on a stage of their own (MascotStagePlacement), with room for props,
+        /// so the sticker's own eye rectangle is not where they end up. Nil for a sticker
+        /// without animations or eyes, which is drawn as it is.
+        static func stagedEyes(_ name: String) -> CGRect? {
+            guard !MascotAnimation.all(for: name).isEmpty, let eyes = StickerLayers.shared.eyes(named: name)
+            else { return nil }
+            let stage = MascotStagePlacement(named: name)
+            let middle = stage.point(eyes.midX, eyes.midY)
+            let width = eyes.width * stage.scale
+            let height = eyes.height * stage.scale
+            return CGRect(x: middle.x / 240 - width / 2, y: middle.y / 240 - height / 2, width: width, height: height)
         }
 
         /// The character peeking up in a page's header: the eyes span 30 % of the box, low in it.
@@ -176,109 +225,147 @@
         }
     }
 
-    /// 今天, 昨天 or a date above a day's first message.
+    /// 今天, 昨天 or a date above a day's first message: small gray text between two hairlines.
     struct DayDivider: View {
         let text: String
 
         var body: some View {
-            Text(text)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(Palette.bubble))
-                .frame(maxWidth: .infinity)
-                .padding(.top, 4)
+            HStack(spacing: 10) {
+                Palette.hairline.frame(height: 1)
+                Text(text)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Palette.hairline.frame(height: 1)
+            }
+            .padding(.top, 6)
         }
     }
 
-    /// One message: the Bot's on the left next to its face in a bubble of its color, mine on the
-    /// right in warm gray as in Claude's app, the App's notes small in the middle.
+    /// The chat's text sizes: 16 points on the iPhone, the Mac's 13.
+    enum ChatFont {
+        #if os(iOS)
+            static let body = Font.callout
+            static let title = Font.callout.weight(.semibold)
+            static let name = Font.footnote.weight(.semibold)
+        #else
+            static let body = Font.body
+            static let title = Font.headline
+            static let name = Font.callout.weight(.semibold)
+        #endif
+    }
+
+    /// One message, as in today's AI apps: the Bot's across the full width without a bubble,
+    /// under a line with its face, name and time (left out for a message that follows its own
+    /// within a few minutes); mine on the right in a warm gray bubble; a failed run as one
+    /// quiet line with a warning sign; the App's notes small in the middle.
     struct MessageView: View {
         @EnvironmentObject private var store: AppStore
         let message: BotMessage
         let bot: Bot
-        @State private var hovering = false
+        /// The face, name and time above the message.
+        var showsHeader = true
 
         var time: String { DueText.format(message.date, "HH:mm", store.calendar) }
 
         var body: some View {
             switch message.author {
-            case .bot: fromBot
-            case .me: fromMe
+            case .bot: message.failed ? AnyView(failure) : AnyView(fromBot)
+            case .me: AnyView(fromMe)
             case .app:
-                Text(message.text)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Palette.bubble))
-                    .frame(maxWidth: .infinity)
+                AnyView(
+                    Text(message.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity))
             }
         }
 
+        var copyText: String { message.title.map { "\($0)\n\(message.text)" } ?? message.text }
+
         var fromBot: some View {
-            HStack(alignment: .top, spacing: 10) {
-                BotAvatar(bot: bot)
-                    .frame(width: 32, height: 32)
-                VStack(alignment: .leading, spacing: 4) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let title = message.title {
-                            Text(title).font(.headline)
-                        }
-                        if !message.text.isEmpty {
-                            MarkdownText(message.text)
-                        }
-                        if !message.todos.isEmpty {
-                            Divider()
-                            Text("提炼出的待办（\(message.todos.count)）")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            ForEach(message.todos) { todo in
-                                TodoRow(todo: todo, compact: true)
-                            }
-                        }
+            VStack(alignment: .leading, spacing: 6) {
+                if showsHeader {
+                    HStack(spacing: 7) {
+                        BotAvatar(bot: bot).frame(width: 22, height: 22)
+                        Text(store.displayName(bot)).font(ChatFont.name)
+                        Text(time).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        UnevenRoundedRectangle(
-                            topLeadingRadius: 4, bottomLeadingRadius: 14, bottomTrailingRadius: 14,
-                            topTrailingRadius: 14
-                        )
-                        .fill(message.failed ? Color.red.opacity(0.09) : bot.accent.opacity(hovering ? 0.13 : 0.08)))
-                    .onHover { hovering = $0 }
-                    .contextMenu {
-                        Button("拷贝") { copy(message.title.map { "\($0)\n\(message.text)" } ?? message.text) }
-                    }
-                    Text(time).font(.caption2).foregroundStyle(.tertiary)
+                    .padding(.bottom, 2)
                 }
-                .frame(maxWidth: 560, alignment: .leading)
-                Spacer(minLength: 40)
+                if let title = message.title {
+                    Text(title).font(ChatFont.title)
+                }
+                if !message.text.isEmpty {
+                    BulletedText(source: bot.isAssistant && message.id.hasPrefix("summary-")
+                        ? DashboardEdit.trimBrief(message.text, dropping: ["还不确定"]) : message.text)
+                        .font(ChatFont.body)
+                        .lineSpacing(2)
+                        .tint(bot.accentText)
+                }
+                if bot.isAssistant && message.id.hasPrefix("summary-"), !store.visibleUnsure.isEmpty {
+                    UnsureItems(expanded: true)
+                }
+                if !message.cards.isEmpty {
+                    AttachedCards(cards: message.cards, bot: bot).padding(.top, 4)
+                }
+                if !message.todos.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(bot.isAssistant ? "今天新建的待办（\(message.todos.count)）" : "提炼出的待办（\(message.todos.count)）")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ActionableTodos(todos: message.todos)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline))
+                    .padding(.top, 2)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button("拷贝") { copy(copyText) }
+            }
+        }
+
+        /// A run that went wrong: a warning sign and the reason, small, with its time.
+        var failure: some View {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text(message.title.map { "\($0)：\(message.text)" } ?? message.text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Text(time).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.08)))
+            .contextMenu {
+                Button("拷贝") { copy(copyText) }
             }
         }
 
         var fromMe: some View {
-            HStack(alignment: .top, spacing: 10) {
-                Spacer(minLength: 80)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(message.text)
-                        .selectableText()
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            UnevenRoundedRectangle(
-                                topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 14,
-                                topTrailingRadius: 4
-                            )
-                            .fill(Palette.bubble))
-                    Text(time).font(.caption2).foregroundStyle(.tertiary)
-                }
-                Image(systemName: "person.crop.circle.fill")
-                    .resizable()
-                    .frame(width: 32, height: 32)
-                    .foregroundStyle(.secondary)
+            HStack {
+                Spacer(minLength: 56)
+                Text(message.text)
+                    .font(ChatFont.body)
+                    .selectableText()
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Palette.bubble))
+                    .help(time)
+                    .contextMenu {
+                        Button("拷贝") { copy(message.text) }
+                        Text("发送于 \(time)")
+                    }
             }
         }
 
@@ -292,38 +379,108 @@
         }
     }
 
-    /// The Bot is working (one of its jobs is running): three dots bouncing in a bubble.
+    /// The cards a Bot attached to a reply, as they were when it wrote it: under the text, no
+    /// wider than a card on the dashboard, with one line under them all (they are taken together):
+    /// 「截至 14:05」 and 「看最新」, which opens the Bot's cards beside the chat, left out when none
+    /// of them is there (助理 showing 作业's homework). Nothing in them can be ticked: they are
+    /// a record.
+    struct AttachedCards: View {
+        @EnvironmentObject private var store: AppStore
+        @AppStorage(CardStyle.storageKey) private var style = CardStyle.plain
+        @Environment(\.openBotCards) private var openCards
+        let cards: [Card]
+        let bot: Bot
+
+        static let maxWidth: CGFloat = 460
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(cards) { card in
+                    CardView(card: card).frame(maxWidth: Self.maxWidth, alignment: .leading)
+                }
+                footer
+            }
+            .tint(bot.accent)
+            .environment(\.cardStyle, style)
+            .environment(\.cardAccentText, bot.accentText)
+        }
+
+        /// Whether the Bot's own cards, beside its chat, have this one's plugin.
+        func isOwn(_ card: Card) -> Bool { card.plugin.map(bot.pluginIDs.contains) ?? true }
+
+        var footer: some View {
+            HStack(spacing: 8) {
+                if let taken = cards.compactMap(\.takenAt).max() {
+                    Text("截至 \(when(taken))")
+                }
+                if let openCards, cards.contains(where: isOwn) {
+                    Button {
+                        openCards()
+                    } label: {
+                        HStack(spacing: 2) {
+                            Text("看最新")
+                            Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(bot.accentText)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .padding(.leading, 4)
+        }
+
+        /// 14:05 today, 昨天 14:05, or 11月6日 14:05.
+        func when(_ date: Date) -> String {
+            let calendar = store.calendar
+            let time = DueText.format(date, "HH:mm", calendar)
+            if calendar.isDateInToday(date) { return time }
+            if calendar.isDateInYesterday(date) { return "昨天 \(time)" }
+            return DueText.format(date, "M月d日 HH:mm", calendar)
+        }
+    }
+
+    private struct OpenBotCardsKey: EnvironmentKey {
+        static var defaultValue: (() -> Void)? { nil }
+    }
+
+    extension EnvironmentValues {
+        /// Opens the cards beside a Bot's chat; set by the Bot's page.
+        var openBotCards: (() -> Void)? {
+            get { self[OpenBotCardsKey.self] }
+            set { self[OpenBotCardsKey.self] = newValue }
+        }
+    }
+
+    /// The Bot is working (one of its jobs is running): its face and three dots bouncing, no
+    /// bubble, like its messages.
     struct TypingBubble: View {
         let bot: Bot
+        @EnvironmentObject private var store: AppStore
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
                 BotAvatar(bot: bot, live: true)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 22, height: 22)
                 TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { context in
                     let time = context.date.timeIntervalSinceReferenceDate
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         ForEach(0..<3, id: \.self) { index in
                             let wave = reduceMotion ? 0 : max(0, sin(time * 2 * .pi - Double(index) * 0.7))
                             Circle()
-                                .fill(bot.accent.opacity(0.5 + 0.5 * wave))
-                                .frame(width: 7, height: 7)
-                                .offset(y: -4 * wave)
+                                .fill(bot.accent.opacity(0.45 + 0.55 * wave))
+                                .frame(width: 6, height: 6)
+                                .offset(y: -3 * wave)
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 13)
-                    .background(
-                        UnevenRoundedRectangle(
-                            topLeadingRadius: 4, bottomLeadingRadius: 14, bottomTrailingRadius: 14,
-                            topTrailingRadius: 14
-                        )
-                        .fill(bot.accent.opacity(0.08)))
+                    .padding(.vertical, 6)
                 }
-                Text("\(bot.name) 正在忙…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text("正在忙… · " + ManualEntryText.elapsed(since: store.busySince(bot), now: context.date))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
                 Spacer()
             }
         }

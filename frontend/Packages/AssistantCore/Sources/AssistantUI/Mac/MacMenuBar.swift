@@ -57,6 +57,7 @@
     public struct MacMenuBarContent: View {
         @EnvironmentObject private var store: AppStore
         @Environment(\.openWindow) private var openWindow
+        @State private var adding = false
 
         public init() {}
 
@@ -75,6 +76,8 @@
                             .foregroundStyle(.secondary)
                     }
                 }
+                Button { adding = true } label: { Label("添加待办或消息", systemImage: "plus") }
+                    .accessibilityLabel("新建待办或贴一段消息")
                 Divider()
                 let todos = Array((store.today?.todos ?? []).prefix(6))
                 if todos.isEmpty {
@@ -113,6 +116,7 @@
             }
             .padding(14)
             .frame(width: 320)
+            .sheet(isPresented: $adding) { ManualEntryComposer().environmentObject(store) }
         }
     }
 #endif

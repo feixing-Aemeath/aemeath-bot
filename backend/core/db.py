@@ -5,6 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from core import private_files
+from core.migrations import upgrade_v9, upgrade_v10
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
@@ -21,7 +24,9 @@ def dump(value) -> str:
 class Database:
     def __init__(self, path: Path):
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        private_files.directory(path.parent)
+        private_files.backups(path.parent / "backups")
+        private_files.sqlite_files(path)
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""
@@ -32,7 +37,6 @@ class Database:
               processed INTEGER NOT NULL DEFAULT 0, preview INTEGER NOT NULL DEFAULT 0,
               revised INTEGER NOT NULL DEFAULT 0, flags TEXT NOT NULL DEFAULT '[]',
               outgoing INTEGER NOT NULL DEFAULT 0, UNIQUE(plugin,external_id));
-            CREATE INDEX IF NOT EXISTS messages_pending ON messages(processed,priority,sent_at);
             CREATE INDEX IF NOT EXISTS messages_chat ON messages(plugin,chat_name,sent_at);
             CREATE TABLE IF NOT EXISTS todos (
               id TEXT PRIMARY KEY, title TEXT NOT NULL, notes TEXT NOT NULL,
@@ -43,13 +47,34 @@ class Database:
               updated_at TEXT NOT NULL, sync_status TEXT NOT NULL DEFAULT 'pending', sync_error TEXT);
             CREATE TABLE IF NOT EXISTS outbox (
               todo_id TEXT PRIMARY KEY REFERENCES todos(id), revision INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS todo_changes (
+              id TEXT PRIMARY KEY, todo_id TEXT NOT NULL, old_status TEXT NOT NULL,
+              status TEXT NOT NULL, from_agent INTEGER NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS todo_dedup_keys (
+              dedup_key TEXT NOT NULL, todo_id TEXT NOT NULL REFERENCES todos(id),
+              PRIMARY KEY(dedup_key,todo_id));
+            CREATE TABLE IF NOT EXISTS extraction_missed (
+              kind TEXT NOT NULL, reference_id TEXT NOT NULL, created_at TEXT NOT NULL,
+              source_json TEXT, PRIMARY KEY(kind,reference_id));
+            CREATE TABLE IF NOT EXISTS inbox_submissions (
+              message_id TEXT PRIMARY KEY REFERENCES messages(id), text_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL, metadata_json TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS inbox_text_time ON inbox_submissions(text_hash,created_at);
+            CREATE TABLE IF NOT EXISTS apple_reminder_state (
+              todo_id TEXT PRIMARY KEY REFERENCES todos(id), reminder_id TEXT NOT NULL,
+              list_id TEXT, missing_reads INTEGER NOT NULL DEFAULT 0, missing_since TEXT);
             CREATE TABLE IF NOT EXISTS digests (
               id TEXT PRIMARY KEY, date TEXT NOT NULL, plugin TEXT NOT NULL,
               summary TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(date,plugin));
+            CREATE INDEX IF NOT EXISTS digests_history ON digests(date DESC,plugin);
+            CREATE INDEX IF NOT EXISTS digests_plugin_history ON digests(plugin,date DESC);
             CREATE TABLE IF NOT EXISTS runs (
               id TEXT PRIMARY KEY, job TEXT NOT NULL, harness TEXT, started_at TEXT NOT NULL,
               finished_at TEXT, status TEXT NOT NULL, error TEXT, attempt INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS runs_job ON runs(job,started_at);
+            CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS runs_job_status_started
+              ON runs(job,status,started_at DESC,id DESC);
             CREATE TABLE IF NOT EXISTS run_usage (
               run_id TEXT PRIMARY KEY REFERENCES runs(id), job TEXT NOT NULL,
               harness TEXT NOT NULL, recorded_at TEXT NOT NULL, input_tokens INTEGER NOT NULL,
@@ -67,6 +92,7 @@ class Database:
               title TEXT, body TEXT, input_json TEXT NOT NULL DEFAULT '{}',
               rejections INTEGER NOT NULL DEFAULT 0, error TEXT, harness TEXT,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(date, kind));
+            CREATE INDEX IF NOT EXISTS health_reports_history ON health_reports(date DESC,kind);
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(path UNINDEXED,content,
               tokenize='trigram');
             CREATE TABLE IF NOT EXISTS device_tokens (
@@ -100,7 +126,43 @@ class Database:
                 conn.execute(
                     "ALTER TABLE knowledge_sources ADD COLUMN organize_offset INTEGER NOT NULL DEFAULT 0"
                 )
-            conn.execute("PRAGMA user_version=5")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(todos)")}
+            for column in ("status_source", "reminder_completed_at"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE todos ADD COLUMN {column} TEXT")
+            if "user_modified_fields" not in columns:
+                conn.execute(
+                    "ALTER TABLE todos ADD COLUMN user_modified_fields TEXT NOT NULL DEFAULT '[]'"
+                )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(todo_changes)")}
+            if "reason" not in columns:
+                conn.execute("ALTER TABLE todo_changes ADD COLUMN reason TEXT")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(outbox)")}
+            if "reminders" not in columns:
+                conn.execute("ALTER TABLE outbox ADD COLUMN reminders INTEGER NOT NULL DEFAULT 1")
+            if "fields" not in columns:
+                conn.execute(
+                    "ALTER TABLE outbox ADD COLUMN fields TEXT NOT NULL "
+                    'DEFAULT \'["title","due_at","has_time","status"]\''
+                )
+            if "agent_base" not in columns:
+                conn.execute("ALTER TABLE outbox ADD COLUMN agent_base TEXT NOT NULL DEFAULT '{}'")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(apple_reminder_state)")}
+            if "last_modified_at" not in columns:
+                conn.execute("ALTER TABLE apple_reminder_state ADD COLUMN last_modified_at TEXT")
+            conn.execute(
+                "INSERT OR IGNORE INTO todo_dedup_keys SELECT dedup_key,id FROM todos "
+                "WHERE dedup_key NOT LIKE 'cancelled:%'"
+            )
+            conn.execute(
+                "UPDATE todos SET dedup_key='cancelled:'||id "
+                "WHERE status='cancelled' AND dedup_key NOT LIKE 'cancelled:%'"
+            )
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version < 9:
+                upgrade_v9(conn)
+            if version < 10:
+                upgrade_v10(conn)
 
     @contextmanager
     def connect(self):

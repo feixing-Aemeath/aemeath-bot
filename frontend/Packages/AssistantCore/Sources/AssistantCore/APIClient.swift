@@ -5,6 +5,8 @@ import Foundation
 #endif
 
 public enum APIError: Error, Equatable, Sendable {
+    /// A screen-reading request refused with a machine-readable detail code.
+    case screenOpen(String)
     /// No token stored on this device yet.
     case missingToken
     case unauthorized
@@ -52,7 +54,36 @@ public struct APIClient: Sendable {
     }
 
     public func updateTodo(id: String, _ patch: TodoPatch) async throws -> Todo {
-        try await send("PATCH", ["todos", id], body: patch)
+        do { return try await send("PATCH", ["todos", id], body: patch) }
+        catch APIError.invalidRequest where patch.reason != nil {
+            var legacy = patch
+            legacy.reason = nil
+            return try await send("PATCH", ["todos", id], body: legacy)
+        }
+    }
+
+    public func createTodo(_ todo: TodoNew) async throws -> TodoCreated {
+        let body = try JSONEncoder.assistant().encode(todo)
+        let (payload, status) = try await response("POST", ["todos"], body: body)
+        return TodoCreated(todo: try decode(payload), duplicate: status == 200)
+    }
+
+    public func submitInbox(_ item: InboxItem) async throws -> InboxAccepted {
+        try await send("POST", ["inbox"], body: item)
+    }
+
+    public func todoSources(id: String) async throws -> TodoSourceTexts {
+        try await send("GET", ["todos", id, "sources"], body: Optional<String>.none)
+    }
+
+    public func openChat(pluginID: String, chatName: String) async throws -> OpenChatAccepted {
+        try await send("POST", ["plugins", pluginID, "open-chat"], body: OpenChatRequest(chatName: chatName))
+    }
+
+    public func extractionStats(weeks: Int = 4) async throws -> ExtractionStats {
+        let payload = try await data("GET", ["stats", "extraction"],
+            query: [URLQueryItem(name: "weeks", value: String(weeks))], body: nil)
+        return try decode(payload)
     }
 
     /// `date` is a calendar day, `YYYY-MM-DD`.
@@ -65,8 +96,18 @@ public struct APIClient: Sendable {
         return try await get("digests", query: query)
     }
 
-    public func runs(limit: Int = 50, offset: Int = 0) async throws -> Page<Run> {
-        try await get("runs", query: paging(limit, offset))
+    /// `total` counts everything that matches, so `limit: 1` is enough for a count.
+    public func runs(
+        limit: Int = 50, offset: Int = 0, job: String? = nil, status: RunStatus? = nil,
+        since: Date? = nil, until: Date? = nil
+    ) async throws -> Page<Run> {
+        var query = paging(limit, offset)
+        if let job { query.append(URLQueryItem(name: "job", value: job)) }
+        if let status { query.append(URLQueryItem(name: "status", value: status.rawValue)) }
+        let format = ISO8601DateFormatter()
+        if let since { query.append(URLQueryItem(name: "since", value: format.string(from: since))) }
+        if let until { query.append(URLQueryItem(name: "until", value: format.string(from: until))) }
+        return try await get("runs", query: query)
     }
 
     /// 202 means the job started, not that it succeeded; poll `runs()`.
@@ -107,6 +148,18 @@ public struct APIClient: Sendable {
         return try decode(payload)
     }
 
+    public func botPreferences() async throws -> BotPreferenceSnapshot {
+        try await send("GET", ["app", "bot-preferences"], body: Optional<String>.none)
+    }
+
+    public func updateBotPreferences(_ entries: [String: BotPreferences.Entry], expectedVersion: Int) async throws -> BotPreferenceSnapshot {
+        struct Update: Encodable {
+            let expected_version: Int
+            let entries: [String: BotPreferences.Entry]
+        }
+        return try await send("PUT", ["app", "bot-preferences"], body: Update(expected_version: expectedVersion, entries: entries))
+    }
+
     public func settings() async throws -> RuntimeSettings {
         try await get("settings")
     }
@@ -116,11 +169,12 @@ public struct APIClient: Sendable {
     }
 
     /// Newest first.
-    public func chatMessages(botID: String, limit: Int = 50, offset: Int = 0)
+    public func chatMessages(botID: String, limit: Int = 50, offset: Int = 0, before: String? = nil)
         async throws -> Page<ChatMessage>
     {
-        let payload = try await self.data(
-            "GET", ["bots", botID, "messages"], query: paging(limit, offset), body: nil)
+        var query = paging(limit, offset)
+        if let before { query.append(URLQueryItem(name: "before", value: before)) }
+        let payload = try await self.data("GET", ["bots", botID, "messages"], query: query, body: nil)
         return try decode(payload)
     }
 
@@ -235,6 +289,13 @@ public struct APIClient: Sendable {
         _ method: String, _ path: [String], query: [URLQueryItem] = [], body: Data?,
         contentType: String = "application/json", accept: String = "application/json"
     ) async throws -> Data {
+        try await response(method, path, query: query, body: body, contentType: contentType, accept: accept).0
+    }
+
+    func response(
+        _ method: String, _ path: [String], query: [URLQueryItem] = [], body: Data?,
+        contentType: String = "application/json", accept: String = "application/json"
+    ) async throws -> (Data, Int) {
         guard let token = try tokens.currentToken(), !token.isEmpty else {
             throw APIError.missingToken
         }
@@ -254,8 +315,13 @@ public struct APIClient: Sendable {
         }
         let (payload, response) = result
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if path.last == "open-chat", [403, 409].contains(http.statusCode),
+           let detail = (try? JSONDecoder().decode([String: String].self, from: payload))?["detail"],
+           ["screen_open_not_whitelisted", "screen_open_not_allowed", "screen_open_daily_limit"].contains(detail) {
+            throw APIError.screenOpen(detail)
+        }
         switch http.statusCode {
-        case 200..<300: return payload
+        case 200..<300: return (payload, http.statusCode)
         case 401: throw APIError.unauthorized
         case 403: throw APIError.forbidden
         case 404: throw APIError.notFound

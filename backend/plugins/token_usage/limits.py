@@ -144,13 +144,16 @@ def codex_live(executable=None, timeout=TIMEOUT):
     executable = executable or find_command("codex")
     if not executable:
         raise LimitError("codex_not_found")
-    process = subprocess.Popen(
-        command_argv([executable, "app-server"]),
-        **helper_process.process_options(),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        process = subprocess.Popen(
+            command_argv([executable, "app-server"]),
+            **helper_process.process_options(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise LimitError("codex_app_server_failed") from error
     deadline = time.monotonic() + timeout
     replies = json_lines(process.stdout, deadline)
 
@@ -190,8 +193,8 @@ def codex_from_sessions(dirs, newest=30):
         if root.is_dir():
             files.extend(root.glob("**/rollout-*.jsonl"))
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    found = None
     for path in files[:newest]:
-        found = None
         with contextlib.suppress(OSError), path.open(encoding="utf-8") as lines:
             for line in lines:
                 if '"rate_limits"' not in line:
@@ -201,11 +204,15 @@ def codex_from_sessions(dirs, newest=30):
                     snapshot = event["payload"]["rate_limits"]
                 except (ValueError, KeyError, TypeError):
                     continue
-                if isinstance(snapshot, dict):
-                    found = (epoch(event.get("timestamp")), snapshot)
-        if found:
-            return found
-    return None
+                timestamp = epoch(event.get("timestamp"))
+                if (
+                    isinstance(snapshot, dict)
+                    and timestamp is not None
+                    and codex_windows(snapshot)
+                    and (found is None or timestamp > found[0])
+                ):
+                    found = (timestamp, snapshot)
+    return found
 
 
 def read_codex(session_dirs, live=codex_live, now=time.time):

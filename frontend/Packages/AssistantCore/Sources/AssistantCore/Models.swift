@@ -4,7 +4,7 @@ import Foundation
 // exact bounds and enums are in docs/openapi.json.
 
 public enum TodoStatus: String, Codable, CaseIterable, Sendable {
-    case pending, completed, deleted
+    case pending, completed, deleted, cancelled
 }
 
 public enum SyncStatus: String, Codable, Sendable {
@@ -110,6 +110,15 @@ public struct Todo: Codable, Hashable, Identifiable, Sendable {
 public struct Page<Item: Codable & Sendable>: Codable, Sendable {
     public var items: [Item]
     public var total: Int
+    /// Only chat, digests and health reports send these: `before: nextBefore` reads on.
+    public var hasMore: Bool?
+    public var nextBefore: String?
+
+    enum CodingKeys: String, CodingKey {
+        case items, total
+        case hasMore = "has_more"
+        case nextBefore = "next_before"
+    }
 }
 
 extension Page: Equatable where Item: Equatable {}
@@ -213,10 +222,12 @@ public struct Today: Codable, Hashable, Sendable {
     /// Due today or overdue, not completed.
     public var todos: [Todo]
     public var cards: [Card]
+    public var unsure: [UnsureItem]?
 
-    public init(date: String, summary: String, todos: [Todo], cards: [Card]) {
+    public init(date: String, summary: String, todos: [Todo], cards: [Card], unsure: [UnsureItem]? = nil) {
         self.date = date
         self.summary = summary
+        self.unsure = unsure
         self.todos = todos
         self.cards = cards
     }
@@ -359,9 +370,25 @@ public struct HealthSample: Codable, Hashable, Sendable {
 
 public struct HealthBatch: Codable, Hashable, Sendable {
     public var samples: [HealthSample]
+    public var deleted: [String]
 
-    public init(samples: [HealthSample]) {
+    public init(samples: [HealthSample] = [], deleted: [String] = []) {
         self.samples = samples
+        self.deleted = deleted
+    }
+
+    enum CodingKeys: String, CodingKey { case samples, deleted }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        samples = try container.decodeIfPresent([HealthSample].self, forKey: .samples) ?? []
+        deleted = try container.decodeIfPresent([String].self, forKey: .deleted) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(samples, forKey: .samples)
+        if !deleted.isEmpty { try container.encode(deleted, forKey: .deleted) }
     }
 }
 
@@ -446,6 +473,9 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
     public var author: ChatAuthor
     /// Markdown when the Bot wrote it.
     public var text: String
+    public var replies: [String]?
+    /// Plugin cards the Bot attached to its reply, as they were when it wrote it (at most 2).
+    public var cards: [Card]?
     public var status: ChatStatus
     /// A fixed category when failed, e.g. `all_harnesses_failed`, `interrupted`.
     public var error: String?
@@ -455,12 +485,15 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
 
     public init(
         id: String, botID: String, author: ChatAuthor, text: String, status: ChatStatus,
-        error: String? = nil, createdAt: Date, updatedAt: Date
+        error: String? = nil, createdAt: Date, updatedAt: Date, replies: [String]? = nil,
+        cards: [Card]? = nil
     ) {
         self.id = id
         self.botID = botID
         self.author = author
         self.text = text
+        self.replies = replies
+        self.cards = cards
         self.status = status
         self.error = error
         self.createdAt = createdAt
@@ -468,7 +501,7 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, author, text, status, error
+        case id, author, text, status, error, replies, cards
         case botID = "bot_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"

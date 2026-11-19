@@ -28,6 +28,7 @@ FAKE_HELPER = str(Path("/fake/helper").resolve())
     [
         ("未交名单：张 三、李四", ["张三"], ["self_listed"]),
         ("以下同学：张\n三", ["张三"], ["self_listed"]),
+        ("以下未交同学：张\n三", ["张三"], ["self_listed"]),
         ("未提交：20260012", ["20260012"], ["self_listed"]),
         ("未提交：202600123", ["20260012"], []),
         ("未交：120260012", ["20260012"], []),
@@ -43,6 +44,134 @@ FAKE_HELPER = str(Path("/fake/helper").resolve())
     ],
 )
 def test_local_roster_rules(text, names, expected):
+    assert message_flags(text, names) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("张三老师：未交名单：李四", []),
+        ("已交名单：张三", []),
+        ("报名名单：张三", []),
+        ("未交名单：李四\n已交名单：张三", []),
+        ("未交名单：李四；已提交名单：张三", []),
+        ("未交名单：李四\n已交：张三", []),
+        ("未交名单：李四\n备注：张三老师已确认", []),
+        ("张三老师：未交名单：李四\n张三", ["self_listed"]),
+        ("已交名单：李四\n未交名单：张 三", ["self_listed"]),
+        ("未交名单：张三丰、李四", []),
+        ("未完成名单：张三、李四", ["self_listed"]),
+        ("未 交 名 单：张 三、李四", ["self_listed"]),
+    ],
+)
+def test_self_listed_only_in_an_unfinished_roster(text, expected):
+    assert message_flags(text, ["张三"]) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "以下同学还没交作业：张三、李四",
+        "张三、李四还没交作业，抓紧",
+        "张三还没交",
+        "张三未交",
+        "还未提交作业的同学：张三",
+        "未交作业名单：张三",
+        "以下同学未提交实验报告：\n张三\n李四",
+        "张三 李四 王五 未交",
+        "没交的有：李四，张三",
+        "缺交名单：张三",
+        "以下同学未完成签到：张三",
+        "未报名名单：张三",
+        "名单如下，未交：张三",
+        "张三：未交\n李四：已交",
+        "已交：李四。张三未交",
+        "张三还没有交",
+        "已交名单：李四\n张三还没交",
+        "已交名单：李四，张三还没交",
+        "已交名单：李四 张三还没交",
+        "已交名单：李四\n张 三 还 没 交",
+    ],
+)
+def test_natural_ways_of_saying_the_user_has_not_handed_in(text):
+    assert message_flags(text, ["张三"]) == ["self_listed"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "张三：未交名单：李四",
+        "张三：已交\n李四：未交",
+        "李四：未交\n张三：已交",
+        "张三已交，李四未交",
+        "李四未交，张三已经交了",
+        "已交：张三 未交：李四",
+        "已交名单：张三\n李四还没交",
+        "已交名单：张三 李四还没交",
+        "请张三同学尽快提交",
+    ],
+)
+def test_the_user_is_not_listed_when_the_message_says_otherwise(text):
+    assert message_flags(text, ["张三"]) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("未交名单：张三、李四，请今晚交齐。", ["self_listed"]),
+        ("已交名单：李四\n未交名单：张三，请尽快补交。", ["self_listed"]),
+        ("未交名单：张三\n已交名单：李四，别催错人。", ["self_listed"]),
+        ("已交名单：李四，张三还没交，今晚补上。", ["self_listed"]),
+        ("已交名单：李四张三还没交，看到请补交。", ["self_listed"]),
+        ("已交名单：李四；张三还没交，请抓紧。", ["self_listed"]),
+        ("已交名单：李四。张三未交，请补交。", ["self_listed"]),
+        ("已交名单：李四\n张三你还差一份，今晚补上。", ["self_listed"]),
+        ("张三你还差一份实验报告，今晚补上。", ["self_listed"]),
+        ("未交名单：张 三、李四，今晚截止。", ["self_listed"]),
+        ("以下未交同学：张\n三、李四。", ["self_listed"]),
+        ("已交名单：李四 张 三 还 没 交", ["self_listed"]),
+        ("未交名单：张三同学、李四同学，请补交。", ["self_listed"]),
+        ("未交名单：张三等人，今晚前补齐。", ["self_listed"]),
+        ("未交名单：张三等五人，今晚前补齐。", ["self_listed"]),
+        ("已交名单：李四，张三同学还没有提交，请抓紧。", ["self_listed"]),
+        ("没有报名名单：张三", ["self_listed"]),
+        ("已交的有张三，未交的有李四，李四抓紧。", []),
+        ("张三交了，李四还未交，李四尽快。", []),
+        ("张三已经交了，李四未交，李四抓紧。", []),
+        ("张 三 已 交，李四未交，请李四抓紧。", []),
+        ("已交名单：张三\n李四还没交，请李四补上。", []),
+        ("已交名单：张三，未交名单：李四。", []),
+        ("未交名单：李四\n班主任：张三", []),
+        ("未交名单：李四\n——张三老师", []),
+        ("张三：未交名单：李四，李四今晚补交。", []),
+        ("未交名单：张三丰同学、李四，请补交。", []),
+        ("未交名单：张 三 丰、李四，请补交。", []),
+        ("名单：张三已完成，李四未完成，请李四抓紧。", []),
+        ("已交名单：张三；未交名单：李四\n张三同学已经交过，不用催。", []),
+        ("全班报名接龙\n1. 李四\n2. 张三", ["self_joined"]),
+        ("全班必须报名接龙\n1. 李四\n2. 王五", ["self_missing"]),
+        ("接龙名单\n1. 张三\n2. 李四", ["self_joined"]),
+        ("全班报名接龙\n1. 张三丰同学\n2. 李四", ["self_missing"]),
+        ("材料提交接龙\n1. 张三（已交）\n2. 李四", ["self_joined"]),
+    ],
+)
+def test_roster_messages_as_written_in_real_groups(text, expected):
+    assert message_flags(text, ["张三"]) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "names", "expected"),
+    [
+        ("接龙\n1. 张三已交\n2. 李四", ["张三"], ["self_joined"]),
+        ("接龙\n1. 张三丰\n2. 李四", ["张三"], ["self_missing"]),
+        ("接龙\n1. 老张三\n2. 李四", ["张三"], ["self_missing"]),
+        ("接龙\n1. 张 三 丰\n2. 李四", ["张三"], ["self_missing"]),
+        ("接龙\n1. 张 三（已报名）\n2. 李四", ["张三"], ["self_joined"]),
+        ("接龙\n1. 张三 20260012\n2. 李四", ["张三"], ["self_joined"]),
+        ("接龙\n1. Anna\n2. 李四", ["Ann"], ["self_missing"]),
+    ],
+)
+def test_chain_membership_matches_a_whole_name(text, names, expected):
     assert message_flags(text, names) == expected
 
 
@@ -463,10 +592,10 @@ async def test_daily_limit_is_durable_and_resets_next_day(service):
         ("screen_accessibility_denied", 0, True),
         ("screen_recording_denied", 0, True),
         ("screen_app_not_running", 0, True),
-        # Page 0 already clicked the chat open.
-        ("screen_accessibility_denied", 1, False),
-        # The helper may have clicked before the window went away.
-        ("screen_window_not_found", 0, False),
+        # Page 0 has no time separator, so no message can be resolved before page 1 fails.
+        ("screen_accessibility_denied", 1, True),
+        # Even a possibly clicked chat costs no success quota when it yields nothing.
+        ("screen_window_not_found", 0, True),
     ],
 )
 async def test_an_open_that_clicked_nothing_does_not_use_the_daily_limit(
@@ -492,7 +621,9 @@ async def test_an_open_that_clicked_nothing_does_not_use_the_daily_limit(
     capture.capture_chat = fail
     await read(reader)
     assert service.store.runs()["items"][0]["error"] == code
-    assert (reader.can_open(GROUP) is None) is refunded
+    assert (reader._budget(GROUP)["count"] == 0) is refunded
+    if refunded:
+        assert reader.can_open(GROUP) == "screen_open_backoff"
 
 
 @pytest.mark.parametrize("helper_rejected", [False, True])
@@ -515,7 +646,8 @@ async def test_wrong_title_never_recognizes_chat_or_advances_cursor(service, hel
     assert [m.preview for m in await read(reader)] == [True]
     assert reader.recognizer.calls == ["fake/preview.png"]
     assert reader.cursor(GROUP) is None
-    assert reader.can_open(GROUP) == "screen_open_daily_limit"
+    assert reader._budget(GROUP)["count"] == 0
+    assert reader.can_open(GROUP) == "screen_open_backoff"
     assert capture.operations[-1] == ("preview",)
     assert service.store.runs()["items"][0]["error"] == "screen_chat_mismatch"
 
@@ -566,7 +698,7 @@ async def test_park_chat_after_an_on_demand_read(service):
         service,
         preview_document(chats=chats),
         preview_only=True,
-        open_on_demand=[GROUP],
+        open_on_demand=[GROUP, quiet],
         park_chat=quiet,
     )
     await read(reader)

@@ -17,7 +17,40 @@ from zoneinfo import ZoneInfo
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 
-KEYWORDS = ("截止", "提交", "交", "填写", "完成", "报名", "领取", "参加")
+KEYWORDS = ("截止", "提交", "交", "填写", "完成", "报名", "领取", "参加", "核对")
+CHANGES = ("改到", "改为", "延期", "提前", "换到", "调整")
+CANCELLATIONS = ("取消", "作废", "撤回")
+
+
+def is_injection(text):
+    """A few obvious instruction attacks; this is only a mock routing rule."""
+    return bool(
+        re.search(
+            r"忽略.*规则|\[/?(?:system|assistant)\]"
+            r"|(?:助手|AI).*?(?:系统指令|维护命令|隐私约定|pending|completed)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def change_target(text, todos):
+    """Naive shared four-character phrases, only when there is one best match."""
+    phrases = {
+        part[i : i + 4]
+        for part in re.findall(r"[\u4e00-\u9fff]{4,}", text)
+        for i in range(len(part) - 3)
+    }
+    ranked = []
+    for todo in todos:
+        source = todo["title"] + todo["source_excerpt"]
+        count = sum(phrase in source for phrase in phrases)
+        if count:
+            ranked.append((count, todo))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    if ranked and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
+        return ranked[0][1]
+    return None
 
 
 def server_from_args(kind, args):
@@ -44,7 +77,7 @@ def server_from_args(kind, args):
     )
 
 
-def payload(result):
+def payload(result, collection=False):
     if result.isError:
         raise RuntimeError("tool_failed")
     data = result.structuredContent
@@ -52,7 +85,8 @@ def payload(result):
         return data["result"]
     if data is not None:
         return data
-    return [json.loads(item.text) for item in result.content if getattr(item, "text", None)]
+    values = [json.loads(item.text) for item in result.content if getattr(item, "text", None)]
+    return values[0] if len(values) == 1 and not collection else values
 
 
 def naive_due(text, sent_at):
@@ -75,6 +109,28 @@ def naive_due(text, sent_at):
     return moment, hour is not None
 
 
+async def existing_todos(session):
+    todos = []
+    for status in (None, "cancelled"):
+        offset = 0
+        while True:
+            arguments = {"offset": offset}
+            if status:
+                arguments["status"] = status
+            page = payload(await session.call_tool("todos_list", arguments))
+            todos.extend(page["items"])
+            offset += len(page["items"])
+            if offset >= page["total"]:
+                break
+    return todos
+
+
+def digest_item(notices, message, section):
+    text = re.sub(r"@\S+\s*", "", message["text"]).replace("\n", " ").strip()
+    body = f"{message['chat_name']}：{text}"[:30]
+    notices.setdefault(message["plugin"], {}).setdefault(section, []).append(f"- {body}")
+
+
 async def work(command, args, cwd, forwarded, local_now, zone):
     environment = {**get_default_environment(), **{k: os.environ[k] for k in forwarded}}
     params = StdioServerParameters(command=command, args=args, cwd=cwd, env=environment)
@@ -82,19 +138,51 @@ async def work(command, args, cwd, forwarded, local_now, zone):
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         while True:
-            batch = payload(await session.call_tool("messages_get_unprocessed", {"limit": 100}))
+            batch = payload(
+                await session.call_tool("messages_get_unprocessed", {"limit": 100}), collection=True
+            )
             if not batch:
                 break
             notices = {}
+            batch.sort(key=lambda message: datetime.fromisoformat(message["sent_at"]))
             for message in batch:
                 text = message["text"]
-                if message["sender"] in {"我", "林小满"} or not any(k in text for k in KEYWORDS):
-                    notices.setdefault(message["plugin"], []).append(text[:30])
+                if is_injection(text):
                     continue
+                uncertain = any(word in text for word in ("听说", "可能", "仅", "其他人的任务"))
+                change = any(word in text for word in (*CHANGES, *CANCELLATIONS))
                 sent_at = datetime.fromisoformat(message["sent_at"]).astimezone(zone)
                 due, has_time = naive_due(text, sent_at)
+                if change and not uncertain:
+                    target = change_target(text, await existing_todos(session))
+                    cancelled = any(word in text for word in CANCELLATIONS)
+                    if target:
+                        patch = {
+                            "source_refs": [message["id"]],
+                            "notes": target["notes"]
+                            + f"\n{sent_at:%m月%d日}变更，"
+                            + f"原为 {target['due_at']}；{text}",
+                        }
+                        if cancelled:
+                            patch["status"] = "cancelled"
+                        elif due:
+                            patch.update(due_at=due.isoformat(), has_time=has_time)
+                        payload(
+                            await session.call_tool(
+                                "todos_update", {"id": target["id"], "patch": patch}
+                            )
+                        )
+                    if target or cancelled:
+                        digest_item(notices, message, "通知")
+                        continue
+                if uncertain:
+                    digest_item(notices, message, "还不确定")
+                    continue
+                if message["sender"] in {"我", "林小满"} or not any(k in text for k in KEYWORDS):
+                    digest_item(notices, message, "通知")
+                    continue
                 todo = {
-                    "title": re.sub(r"@\S+\s*", "", text).strip()[:20] or text[:20],
+                    "title": re.sub(r"@\S+\s*", "", text).strip()[:80] or text[:80],
                     "due_at": due.isoformat() if due else None,
                     "has_time": has_time,
                     "source_plugin": message["plugin"],
@@ -103,8 +191,13 @@ async def work(command, args, cwd, forwarded, local_now, zone):
                     "confidence": 0.9,
                 }
                 payload(await session.call_tool("todos_add", {"todo": todo}))
-            for plugin, texts in notices.items():
-                summary = f"（mock）{len(texts)} 条非待办消息：" + "；".join(texts[:3])
+                digest_item(notices, message, "新待办")
+            for plugin, sections in notices.items():
+                summary = "\n\n".join(
+                    "\n".join([f"**{section}**", *sections[section]])
+                    for section in ("新待办", "通知", "还不确定")
+                    if section in sections
+                )
                 arguments = {"date": local_now[:10], "plugin": plugin, "summary": summary}
                 payload(await session.call_tool("digest_write", arguments))
             ids = [message["id"] for message in batch]

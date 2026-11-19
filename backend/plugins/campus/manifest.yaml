@@ -2,7 +2,7 @@ id: campus
 name: 请假与学校活动
 version: 0.1.0
 icon: calendar
-description: 请假记录和审批进度，以及讲座、比赛、报名这类学校活动；Agent 读消息时记下，也可以在对话里告诉它
+description: 请假记录和审批进度，以及讲座、比赛、报名这类学校活动；Agent 读消息时记下，也可以在对话里告诉它；可选每两小时从 Chrome 里登录好的第二课堂读可报名活动和自己的报名
 platforms: [any]
 permissions: []
 schedule: null
@@ -18,3 +18,7 @@ config_schema:
       maximum: 60
       default: 3
       description: Keep showing an activity this many days after it ended
+    dekt_sync:
+      type: boolean
+      default: false
+      description: Every two hours read the activities open for sign-up and your own sign-ups from the 第二课堂 page open and logged in in Chrome (dekt.example.edu.cn/yb/), through the site's own read-only requests; needs Chrome's 允许 Apple 事件中的 JavaScript and 自动化 → Google Chrome

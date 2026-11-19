@@ -32,12 +32,19 @@ config_schema:
       items: {type: string, minLength: 1}
       default: []
       description: whitelist 的子集；点开会标为已读，手机红点也会消失
-    on_demand_pages: {type: integer, minimum: 1, maximum: 20, default: 2}
+    on_demand_pages: {type: integer, minimum: 1, maximum: 60, default: 2}
     park_chat:
       type: string
       minLength: 1
-      description: 按需点开以后切到这个白名单会话；不填时刚点开的群会一直开着，新消息可能继续被标为已读
+      description: 按需点开以后切到这个同时在 whitelist 和 open_on_demand 中的会话；不填时刚点开的群会一直开着，新消息可能继续被标为已读
     max_opens_per_chat_per_day: {type: integer, minimum: 0, maximum: 100, default: 4}
+    open_on_unread:
+      type: boolean
+      default: true
+      description: open_on_demand 里的会话在列表上有未读角标时点开读全文；点开会标为已读
+    max_unread_opens_per_chat_per_day: {type: integer, minimum: 0, maximum: 100, default: 12}
+    max_failed_opens_per_chat_per_day: {type: integer, minimum: 1, maximum: 100, default: 4}
+    open_retry_backoff_minutes: {type: integer, minimum: 1, maximum: 480, default: 60}
     max_pages: {type: integer, minimum: 1, maximum: 100, default: 20}
     initial_pages:
       type: integer

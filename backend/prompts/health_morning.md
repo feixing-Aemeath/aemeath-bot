@@ -5,11 +5,27 @@
 ## 步骤
 
 1. 调用 health_report_input，参数 {"arguments": {"kind": "morning", "date": "{date}"}}。它返回本次简报允许使用的全部数据：daily（昨天和今天的按天汇总、与 7/30 天个人基线的偏离、预警）、sleep（近 7 晚睡眠、规律性）、baselines（个人基线）、display（已经换算好的写法，例如睡眠时长「7小时40分」）、goals（长期记忆里的训练目标，可能为空）。
-2. 写简报，分三段，每段一个小标题：
-   - **睡得怎么样**：昨晚的入睡和醒来时间、睡眠时长（优先用 display 里的写法）、各睡眠阶段，以及和个人基线比是多是少。睡眠时长是整个睡眠日的总睡眠，包含小睡（display 的 last_night_asleep、sleep 里的 total_minutes）；有小睡时分别说主睡眠（last_night_main_sleep）和小睡（last_night_naps）。入睡、醒来时间和各睡眠阶段只描述主睡眠。
-   - **身体恢复情况**：今天的综合准备度（days 里当天 readiness 的 score，0–10 分，以及 components 里各项的 score；score 为 null 时写「数据不足」），静息心率、HRV、呼吸频率、手腕温度等和基线的偏离（看 vs_7d / vs_30d 的 level 和 delta），以及 alerts 里的预警。HRV 用当天 hrv_preferred 指定的那一项：hrv_ln_rmssd 用 rmssd_ms 并写明「RMSSD」，hrv_ln_sdnn 用 sdnn_ms 并写明「SDNN」；两种是不同的指标，不要拿一种和另一种比较。
-   - **今天的训练强度建议**：从「休息 / 低强度 / 中等强度 / 正常训练」中选一个，用一两句话说明理由，并结合 goals 里的训练目标。
-3. 调用 health_report_write 提交，参数 {"arguments": {"kind": "morning", "date": "{date}", "title": "…", "body": "…"}}。标题可以参考 title_hint，不超过 30 字；正文用 Markdown，全文 600 字以内。
+2. 写简报。用户在手机上看，要一眼看完，必须照这个格式、只写重点：
+
+```
+**睡眠** <总睡眠时长>，<和个人基线比：多 / 少 / 差不多>
+- <入睡时刻> 入睡，<醒来时刻> 醒来
+- <偏离基线较多的睡眠阶段，一条一项；有小睡时一条写小睡>
+
+**恢复** 准备度 <score> 分
+- <偏离基线较多的指标，一条一项，写方向和差值>
+- <alerts 里的预警，写「建议关注」>
+
+**建议** <休息 / 低强度 / 中等强度 / 正常训练>
+- <一句理由，有 goals 时结合训练目标>
+```
+
+   - 三节固定这个顺序，每节第一行是加粗的节名加一句概括，下面每条一行、以「- 」开头、只说一件事、不超过 30 个字。节和节之间空一行。全文不超过 250 字，不写开场白、结尾和免责声明。
+   - **睡眠**：睡眠时长是整个睡眠日的总睡眠，包含小睡（display 的 last_night_asleep、sleep 里的 total_minutes），优先用 display 里的写法；有小睡时另起一条写主睡眠（last_night_main_sleep）和小睡（last_night_naps）。入睡、醒来时刻和各睡眠阶段只说主睡眠。
+   - **恢复**：准备度用 days 里当天 readiness 的 score（0–10 分），score 为 null 时这一行写「**恢复** 准备度数据不足」。只列 vs_7d / vs_30d 的 level 明显偏离的指标（静息心率、HRV、呼吸频率、手腕温度、血氧等）；都在正常波动范围就只写一条「其他指标都在平时范围」。HRV 用当天 hrv_preferred 指定的那一项：hrv_ln_rmssd 用 rmssd_ms 并写明「RMSSD」，hrv_ln_sdnn 用 sdnn_ms 并写明「SDNN」；两种是不同的指标，不要拿一种和另一种比较。
+   - **建议**：从「休息 / 低强度 / 中等强度 / 正常训练」中选一个写在节名后面，下面一两条理由。
+   - 某一节的数据整体不足时，只写一行，比如「**睡眠** 昨晚没有记录」，下面不再逐项写「数据不足」。
+3. 调用 health_report_write 提交，参数 {"arguments": {"kind": "morning", "date": "{date}", "title": "…", "body": "…"}}。标题可以参考 title_hint，不超过 30 字；正文就是上面格式的 Markdown。
 4. 如果返回 accepted=false，按 errors 逐条修改后重新提交，直到 accepted=true 或 attempts_left 为 0。
 5. 最后只回复「已写入」或失败原因，不要复述数据。
 

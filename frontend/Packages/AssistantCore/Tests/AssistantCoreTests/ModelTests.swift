@@ -110,6 +110,21 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(try encoded(config), #"{"config":{"whitelist":["班级群"]}}"#)
     }
 
+    func testTitleOnlyEditPreservesAllDayDeadlineAcrossTimeZones() throws {
+        var todo = try decode(Todo.self, Fixtures.todo)
+        todo.dueAt = iso("2026-11-06T00:00:00+08:00")
+        todo.hasTime = false
+        let calendar = DueText.calendar(timeZone: TimeZone(identifier: "America/Los_Angeles")!)
+        var draft = TodoDraft(todo, calendar: calendar)
+        XCTAssertTrue(draft.patch(from: todo, calendar: calendar).isEmpty)
+        draft.title = "新标题"
+        XCTAssertEqual(try encoded(draft.patch(from: todo, calendar: calendar)), #"{"title":"新标题"}"#)
+        draft.due = calendar.date(byAdding: .day, value: 1, to: draft.due)!
+        XCTAssertEqual(draft.patch(from: todo, calendar: calendar).due, .set(calendar.startOfDay(for: draft.due)))
+        draft.hasDue = false
+        XCTAssertEqual(draft.patch(from: todo, calendar: calendar).due, .clear)
+    }
+
     func testHealthBatchEncoding() throws {
         let start = iso("2026-10-15T01:00:00Z")
         let batch = HealthBatch(samples: [

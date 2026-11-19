@@ -1,6 +1,7 @@
 """doctor.py on a simulated Mac: canned command outputs, no real system calls."""
 
 import json
+import plistlib
 import sqlite3
 from contextlib import closing
 from pathlib import Path, PurePosixPath
@@ -8,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from core.config import Settings
+from plugins.screen.session import CONSOLE_COMMAND
 from scripts.doctor import (
     PERMISSIONS,
     Result,
@@ -50,6 +52,8 @@ MAC_ONLY = {
     "auto_login",
     "filevault",
     "lock_screen",
+    "desktop_session",
+    "display_power",
     "screensaver",
     "display_attached",
     "launchd",
@@ -69,6 +73,21 @@ class FakeProbe:
             USER,
         )
         self.commands = {
+            tuple(CONSOLE_COMMAND): Result(
+                0,
+                plistlib.dumps(
+                    {
+                        "IOConsoleUsers": [
+                            {
+                                "kCGSSessionUserIDKey": 501,
+                                "kCGSSessionOnConsoleKey": True,
+                                "kCGSessionLoginDoneKey": True,
+                                "CGSSessionScreenIsLocked": False,
+                            }
+                        ]
+                    }
+                ).decode(),
+            ),
             (
                 "/Users/aimis/Library/Application Support/AemeathBot/bin/photo-export",
                 "status",
@@ -150,6 +169,9 @@ class FakeProbe:
 
     def tcc_grants(self, database, service):
         return self.tcc if self.tcc is None else self.tcc.get(service, set())
+
+    def displays_asleep(self):
+        return False
 
     def newest_backup(self, data_dir):
         return None if self.backup_age_hours is None else 1_000_000 - self.backup_age_hours * 3600

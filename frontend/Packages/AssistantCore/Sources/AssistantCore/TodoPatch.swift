@@ -13,29 +13,36 @@ public struct TodoPatch: Encodable, Hashable, Sendable {
     public var notes: String?
     public var due: DueChange?
     public var hasTime: Bool?
+    public var reason: TodoDeleteReason?
     public var status: TodoStatus?
 
     public init(
         title: String? = nil, notes: String? = nil, due: DueChange? = nil, hasTime: Bool? = nil,
-        status: TodoStatus? = nil
+        status: TodoStatus? = nil, reason: TodoDeleteReason? = nil
     ) {
         self.title = title
         self.notes = notes
         self.due = due
         self.hasTime = hasTime
         self.status = status
+        self.reason = reason
+    }
+
+    static func validText(title: String, notes: String) -> Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && title.unicodeScalars.count <= 500 && notes.unicodeScalars.count <= 50000
     }
 
     public static func complete() -> TodoPatch { TodoPatch(status: .completed) }
     /// Deleting in the App also deletes the reminder.
-    public static func delete() -> TodoPatch { TodoPatch(status: .deleted) }
+    public static func delete(reason: TodoDeleteReason? = nil) -> TodoPatch { TodoPatch(status: .deleted, reason: reason) }
 
     public var isEmpty: Bool {
         title == nil && notes == nil && due == nil && hasTime == nil && status == nil
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, notes, status
+        case title, notes, status, reason
         case dueAt = "due_at"
         case hasTime = "has_time"
     }
@@ -46,6 +53,7 @@ public struct TodoPatch: Encodable, Hashable, Sendable {
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(hasTime, forKey: .hasTime)
         try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(reason, forKey: .reason)
         switch due {
         case .set(let date): try container.encode(date, forKey: .dueAt)
         case .clear: try container.encodeNil(forKey: .dueAt)
@@ -72,7 +80,7 @@ public struct TodoDraft: Equatable, Sendable {
     }
 
     public var isValid: Bool {
-        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        TodoPatch.validText(title: title.trimmingCharacters(in: .whitespacesAndNewlines), notes: notes)
     }
 
     public func patch(from todo: Todo, calendar: Calendar = DueText.calendar()) -> TodoPatch {
@@ -81,8 +89,8 @@ public struct TodoDraft: Equatable, Sendable {
         if title != todo.title { patch.title = title }
         if notes != todo.notes { patch.notes = notes }
         if hasDue {
-            let date = hasTime ? due : calendar.startOfDay(for: due)
-            if date != todo.dueAt || hasTime != todo.hasTime {
+            if due != todo.dueAt || hasTime != todo.hasTime {
+                let date = hasTime ? due : calendar.startOfDay(for: due)
                 patch.due = .set(date)
                 patch.hasTime = hasTime
             }

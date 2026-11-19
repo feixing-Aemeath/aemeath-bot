@@ -83,7 +83,7 @@ fun SettingsScreen(
 @Composable
 private fun SettingsHome(model: AppModel, s: AppState, navigate: (String, String) -> Unit) {
     val links = listOf(
-        Triple("连接", "connection", if (model.device.mock) "模拟数据" else if (s.online) "Mac 在线" else "连不上"),
+        Triple("连接", "connection", if (model.device.mock) "模拟数据" else if (s.online) "后端在线" else "连不上"),
         Triple("插件", "plugins", "${s.plugins.count { it.enabled }} 个已启用"),
         Triple("消息来源", "sources", "${model.bots().count { it.kind==BotKind.SOURCE }} 个"),
         Triple("健康数据", "health", if (model.device.tablet) "由手机上传" else if (model.device.healthEnabled) "已开启" else "未开启"),
@@ -530,7 +530,9 @@ private fun HealthPage(model: AppModel) {
                                 revision++
                             }
                         },
-                        enabled = !sending && !model.device.mock && model.device.healthEnabled
+                        enabled = !sending && !model.device.mock && granted.any {
+                            it != androidx.health.connect.client.permission.HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND
+                        }
                     ) { Text(if (sending) "上传中…" else "立即上传") }
                 }
             }

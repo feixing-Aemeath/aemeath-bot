@@ -46,7 +46,7 @@ class PresentationTest {
     fun trayExplainsOfflineStateWithoutLosingCachedCount() {
         val text = TrayText.from(Today("2026-11-01", "", listOf(Todo("a", "待办"))), false, MascotState.IDLE)
         assertEquals(1, text.remaining)
-        assertTrue(text.tooltip.contains("连不上 Mac"))
+        assertTrue(text.tooltip.contains("连不上后端"))
     }
 
     @Test
@@ -95,6 +95,7 @@ class PresentationTest {
         assertEquals("2 个", links.getValue("sources").detail)
         assertEquals("连不上", links.getValue("connection").detail)
         assertEquals("模拟数据", settingsLinks(true, false, plugins).first().detail)
+        assertEquals("后端在线", settingsLinks(false, true, plugins).first().detail)
     }
 
     @Test

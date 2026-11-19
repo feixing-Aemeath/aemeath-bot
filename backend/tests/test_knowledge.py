@@ -3,6 +3,7 @@
 import asyncio
 import json
 import subprocess
+import zipfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -293,6 +294,8 @@ def test_reindex_retries_failed_extraction_without_changing_file(service, failur
 
 def test_mac_extractor_protocol_with_fake_subprocess(tmp_path, monkeypatch):
     calls = []
+    with zipfile.ZipFile(tmp_path / "a.docx", "w") as archive:
+        archive.writestr("word/document.xml", "<document/>")
 
     def run(args, **kwargs):
         calls.append((args, kwargs))
@@ -327,7 +330,7 @@ class Organizer:
             self.service.knowledge.note_write(
                 other, "错", "错", [{"path": "知识库/课程/一.md", "label": ""}]
             )
-        with pytest.raises(ValueError, match="权限"):
+        with pytest.raises(ValueError, match="memory_not_allowed"):
             self.service.memory.read("关于我.md")
         if self.fail:
             return RunResult(False, "agent_failed")
@@ -695,7 +698,7 @@ def test_database_migration_retains_legacy_tokens_and_user_files(tmp_path):
         )
         conn.execute("PRAGMA user_version=3")
     db = Database(path)
-    assert db.rows("PRAGMA user_version")[0]["user_version"] == 5
+    assert db.rows("PRAGMA user_version")[0]["user_version"] == 10
     assert "reader" in {r["name"] for r in db.rows("PRAGMA table_info(device_tokens)")}
     token, _ = DeviceTokens(db).create("legacy", ["mcp"])
     assert DeviceTokens(Database(path)).check(token).reader is None
@@ -781,3 +784,25 @@ def test_private_only_statement_upload_and_skipped_unknown_formats(service, exte
     assert service.knowledge.source(entry["path"])["status"] == "unreadable"
     service.knowledge.patch_access("知识库/财务", [])
     assert service.knowledge.source(entry["path"])["error"] is None
+
+
+@pytest.mark.parametrize(
+    "extension,mime",
+    [
+        ("csv", "text/csv"),
+        ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("zip", "application/zip"),
+        ("unknown", "application/octet-stream"),
+    ],
+)
+def test_raw_download_media_types_are_in_openapi(service, extension, mime):
+    location = f"知识库/私人/a.{extension}"
+    put(service, location, "synthetic")
+    with client_for(service) as client:
+        response = client.get("/api/v1/knowledge/raw", params={"path": location})
+        assert response.status_code == 200
+        assert response.headers["content-type"].split(";")[0] == mime
+        content = client.get("/openapi.json").json()["paths"]["/api/v1/knowledge/raw"]["get"][
+            "responses"
+        ]["200"]["content"]
+        assert mime in content

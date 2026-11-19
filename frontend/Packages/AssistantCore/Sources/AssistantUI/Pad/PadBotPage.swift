@@ -2,12 +2,13 @@
     import AssistantCore
     import SwiftUI
 
-    /// The shared cards and conversation in a wider page, with an input that stays above the
-    /// keyboard. Sources only show what they read; every action is available by touch.
+    /// The conversation in a wider page, opening at the newest line, with an input that stays
+    /// above the keyboard; the Bot's cards in a column on the right (the toolbar's button shows or
+    /// hides it). Sources only show what they read; every action is available by touch.
     struct PadBotPage: View {
         @EnvironmentObject private var store: AppStore
         let bot: Bot
-        @State private var cardsShown = true
+        @Binding var cardsShown: Bool
         @State private var draft = ""
         @State private var cue: MascotCue?
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -21,15 +22,11 @@
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         PadBotHero(bot: bot, status: store.statusLine(bot), cue: cue)
-                        if cardsShown {
-                            VStack(alignment: .leading, spacing: 12) {
-                                BotCards(bot: bot, minWidth: PadPresentation.cardMinimumWidth, wideLayout: true)
-                            }
-                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+                        OfflineBanner()
+                        if bot.isAssistant {
+                            AgentBanner()
+                            SharePendingNotice()
                         }
-                        CardsHandle(shown: $cardsShown, count: BotCards.count(of: bot, in: store))
-                            .frame(minHeight: 44)
-                            .hoverEffect(.highlight)
                         WavyDivider(tint: bot.accent)
                         ChatTimeline(bot: bot)
                         Color.clear.frame(height: 1).id(Self.bottom)
@@ -37,18 +34,34 @@
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
                 }
+                .modifier(ChatScrollAnchor())
                 .scrollDismissesKeyboard(.interactively)
                 .refreshable { await store.refresh() }
                 .background(Palette.page)
                 .safeAreaInset(edge: .bottom) { input }
                 .onChange(of: store.chats[bot.id]?.count) { old, new in
-                    guard let old, let new, new > old else { return }
+                    guard let new else { return }
+                    guard let old else {
+                        proxy.scrollTo(Self.bottom, anchor: .bottom)  // the chat came in: its end
+                        return
+                    }
+                    guard new > old else { return }
                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottom, anchor: .bottom)
                     }
                 }
             }
-            .navigationTitle(bot.name)
+            .environment(\.openBotCards) { cardsShown = true }
+            .inspector(isPresented: $cardsShown) {
+                BotCardsPanel(bot: bot, shown: $cardsShown)
+                    .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    CardsPanelButton(shown: $cardsShown).hoverEffect(.highlight)
+                }
+            }
+            .navigationTitle(store.displayName(bot))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
                 store.markSeen(bot)
@@ -59,7 +72,7 @@
                 if store.messages(bot).last?.author == .bot { cue = MascotCue(.talk) }
             }
             .task(id: CardsLoad(state: plugin?.state, refreshed: store.lastRefresh, plugins: bot.pluginIDs)) {
-                for id in bot.pluginIDs { await store.loadCards(id) }
+                await store.loadCards(of: [bot])
             }
             .task { await store.loadChat(bot) }
         }
@@ -70,19 +83,20 @@
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Palette.page)
+                    .padding(.top, 18)
+                    .padding(.bottom, 12)
+                    .background(PageFade())
             } else {
                 ChatInput(
-                    placeholder: PadPresentation.placeholder(botName: bot.name, replying: store.isReplying(bot)),
+                    placeholder: PadPresentation.placeholder(botName: store.displayName(bot), replying: store.isReplying(bot)),
                     text: $draft, disabled: store.isReplying(bot), returnSends: true
                 ) {
                     let text = draft
                     draft = ""
                     cue = MascotCue(.greet)
                     Task {
-                        await store.send(text, to: bot)
-                        if store.message != nil { draft = text }
+                        let sent = await store.send(text, to: bot)
+                        if !sent, draft.isEmpty { draft = text }
                     }
                 }
             }
@@ -100,21 +114,22 @@
             HStack(spacing: 16) {
                 face
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(bot.name).font(Typography.pageTitle)
+                    Text(store.displayName(bot)).font(Typography.pageTitle)
                     Text(bot.tag)
                         .font(.callout.weight(.medium))
-                        .foregroundStyle(bot.accent)
+                        .foregroundStyle(bot.accentText)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(bot.accent.opacity(0.16)))
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        StatusDot(color: store.botState(bot).color)
+                        if let color = store.botState(bot).dotColor { StatusDot(color: color) }
                         Text(status).foregroundStyle(.secondary)
                     }
                     .font(.callout)
                 }
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                if bot.isAssistant { RunNowChip() }
             }
             .padding(.horizontal, 20)
             .background(
@@ -129,7 +144,7 @@
                 BotAvatar(bot: bot)
                     .frame(width: 84, height: 84)
             } else {
-                let place = FacePlacement.header(bot.look.resolved(in: .main), side: 136)
+                let place = FacePlacement.band(bot.look.resolved(in: .main), side: 136)
                 MascotView(
                     look: bot.look, state: store.botState(bot), since: bot.isAssistant ? store.stateSince : Date(),
                     cue: cue, interactive: true, characterAnimations: true
@@ -137,7 +152,7 @@
                 .frame(width: place.drawn, height: place.drawn)
                 .position(place.center)
                 .frame(width: 136, height: 136)
-                .accessibilityLabel(bot.name)
+                .accessibilityLabel(store.displayName(bot))
             }
         }
     }

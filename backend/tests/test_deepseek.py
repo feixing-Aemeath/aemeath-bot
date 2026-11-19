@@ -1,8 +1,11 @@
 """DeepSeek's harness: the agent loop over the DeepSeek API with the assistant's tools."""
 
+import asyncio
 import json
+import time
 
 import httpx
+import pytest
 
 from harness.deepseek import DeepSeekHarness
 
@@ -121,3 +124,71 @@ async def test_a_model_that_keeps_calling_tools_is_cut_off(monkeypatch):
         key="sk-test", model="deepseek-v4-flash", transport=fake(answers, seen)
     )
     assert (await harness.run("x", CONFIG, 5)).error == "agent_turn_limit"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../../api/v1/jobs/backup/run", "../tools/todos_list", "todos_list?ignored=1", "missing"],
+)
+async def test_model_cannot_call_routes_outside_the_listed_tools(name):
+    seen = []
+    call = {"id": "c", "type": "function", "function": {"name": name, "arguments": "{}"}}
+    answers = [
+        completion({"role": "assistant", "tool_calls": [call]}),
+        completion({"role": "assistant", "content": "好"}),
+    ]
+    harness = DeepSeekHarness(key="sk-test", model="fake", transport=fake(answers, seen))
+    assert (await harness.run("untrusted source", CONFIG, 5)).success
+    assert not [r for r in seen if r.url.host == "core" and r.method == "POST"]
+    message = json.loads(seen[-1].content)["messages"][-1]
+    assert message["content"] == "tool_failed: unknown_tool"
+
+
+async def test_timeout_includes_model_discovery(monkeypatch):
+    harness = DeepSeekHarness(key="sk-test", transport=fake([], []))
+
+    async def stalled():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(harness, "read_models", stalled)
+    result = await asyncio.wait_for(harness.run("x", CONFIG, 0.02), 1)
+    assert not result.success and result.error == "timeout"
+
+
+async def test_timeout_includes_credential_lookup(monkeypatch):
+    harness = DeepSeekHarness(transport=fake([], []))
+
+    def slow_key():
+        time.sleep(0.1)
+        return None
+
+    monkeypatch.setattr(harness, "key", slow_key)
+    result = await harness.run("x", CONFIG, 0.02)
+    assert not result.success and result.error == "timeout"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"choices": []},
+        {"choices": [{"message": {"content": "半截"}, "finish_reason": "length"}]},
+        {"choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}]},
+    ],
+)
+async def test_partial_api_responses_are_not_successful(body):
+    harness = DeepSeekHarness(
+        key="sk-test", model="fake", transport=fake([httpx.Response(200, json=body)], [])
+    )
+    result = await harness.run("x", CONFIG, 5)
+    assert not result.success and result.error == "agent_incomplete"
+
+
+@pytest.mark.parametrize("status", [402, 429])
+async def test_api_quota_status_is_classified_without_relying_on_body(status):
+    harness = DeepSeekHarness(
+        key="sk-test",
+        model="fake",
+        transport=fake([httpx.Response(status, text="retry later")], []),
+    )
+    result = await harness.run("x", CONFIG, 5)
+    assert not result.success and result.error == "quota_exhausted"

@@ -156,8 +156,9 @@ fun TodoList(todos: List<Todo>, store: AppStore, compact: Boolean = false) {
     var editing by remember { mutableStateOf<Todo?>(null) }
     var deleting by remember { mutableStateOf<Todo?>(null) }
     val scope = rememberCoroutineScope()
-    if (todos.isEmpty()) Muted("今天没有要做的事。")
-    todos.forEachIndexed { index, todo ->
+    val visibleTodos = todos.filter { it.visible }
+    if (visibleTodos.isEmpty()) Muted("今天没有要做的事。")
+    visibleTodos.forEachIndexed { index, todo ->
         var saving by remember(todo.id) { mutableStateOf(false) }
         Row(
             Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -292,9 +293,12 @@ fun ServerCard(card: Card, store: AppStore, tint: Color, modifier: Modifier = Mo
         CardBox(card.title, modifier, index, card.symbol) {
             when (val content = card.content) {
                 is CardContent.Items -> {
-                    content.items.forEachIndexed { position, item ->
+                    if (card.listStyle == "rings") RingItems(content.items, tint)
+                    else if (card.listStyle == "timeline") content.items.forEachIndexed { position, item ->
+                        TimelineItem(item, position == content.items.lastIndex, tint)
+                    }
+                    else content.items.forEachIndexed { position, item ->
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-                            if (card.listStyle == "timeline") Label(if (item.state == "done") "✓" else "●", color = tint)
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Label(item.title, weight = if (item.state == "now") FontWeight.SemiBold else FontWeight.Normal)
                                 item.subtitle?.let { Muted(it) }
@@ -305,17 +309,7 @@ fun ServerCard(card: Card, store: AppStore, tint: Color, modifier: Modifier = Mo
                                         "alert" -> Color(0xFFFF3B30)
                                         else -> tint
                                     }
-                                    if (card.listStyle == "rings") {
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Canvas(Modifier.size(32.dp)) {
-                                                drawArc(progressColor.copy(alpha = 0.12f), -90f, 360f, false, style = Stroke(4.dp.toPx()))
-                                                drawArc(progressColor, -90f, progress.fraction.toFloat() * 360, false, style = Stroke(4.dp.toPx()))
-                                            }
-                                            Muted("${progress.value} / ${progress.max}")
-                                        }
-                                    } else {
-                                        LinearProgressIndicator(progress.fraction.toFloat(), Modifier.fillMaxWidth().height(4.dp), color = progressColor)
-                                    }
+                                    LinearProgressIndicator(progress.fraction.toFloat(), Modifier.fillMaxWidth().height(4.dp), color = progressColor)
                                 }
                             }
                         }
@@ -323,21 +317,35 @@ fun ServerCard(card: Card, store: AppStore, tint: Color, modifier: Modifier = Mo
                     }
                 }
                 is CardContent.Stat -> {
-                    Label(content.value + content.unit?.let { " $it" }.orEmpty(), color = tint, size = 32.sp, serif = true)
-                    content.label?.let { Muted(it) }
-                    content.delta?.let { Muted((if (content.trend == "up") "↑ " else if (content.trend == "down") "↓ " else "") + it) }
+                    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Label(content.value, color = if (content.wide && content.bar?.tone == "alert") MaterialTheme.colors.error else tint, size = if (content.wide) 44.sp else 32.sp, serif = !content.wide, weight = if (content.wide) FontWeight.Bold else FontWeight.SemiBold)
+                        content.unit?.let { Muted(it) }
+                    }
                     content.bar?.let { bar ->
-                        Canvas(Modifier.fillMaxWidth().height(8.dp)) {
-                            drawRoundRect(tint.copy(alpha = 0.1f))
+                        val track = when (bar.tone) {
+                            "warn" -> Color(0xFFFF9500).copy(alpha = 0.22f)
+                            "alert" -> MaterialTheme.colors.error.copy(alpha = 0.22f)
+                            else -> LocalPalette.current.muted.copy(alpha = 0.15f)
+                        }
+                        Canvas(Modifier.fillMaxWidth().height(if (content.wide) 12.dp else 6.dp).clip(RoundedCornerShape(6.dp))) {
+                            drawRoundRect(track)
                             var x = 0f
-                            bar.segments.forEachIndexed { segment, point ->
-                                val width = if (bar.max > 0) (point.y / bar.max).coerceIn(0.0, 1.0).toFloat() * size.width else 0f
-                                val visible = width.coerceAtMost((size.width - x).coerceAtLeast(0f))
-                                drawRect(tint.copy(alpha = (1f - segment * 0.15f).coerceAtLeast(0.25f)), Offset(x, 0f), Size(visible, size.height))
+                            bar.fractions.forEachIndexed { segment, fraction ->
+                                val visible = (fraction * size.width).toFloat().coerceAtMost((size.width - x).coerceAtLeast(0f))
+                                if (visible > 0) drawRect(donutColors[segment % donutColors.size], Offset(x, 0f), Size(visible, size.height))
                                 x += visible
                             }
                         }
-                        bar.segments.forEach { Muted("${it.x} ${it.y}") }
+                    }
+                    content.label?.let { Muted(it) }
+                    content.delta?.let {
+                        val arrow = when (content.trend) {
+                            "up" -> "↑ "
+                            "down" -> "↓ "
+                            "flat" -> "→ "
+                            else -> ""
+                        }
+                        Muted(arrow + it)
                     }
                 }
                 is CardContent.Chart -> ChartView(content, tint)
@@ -368,6 +376,56 @@ fun ServerCard(card: Card, store: AppStore, tint: Color, modifier: Modifier = Mo
                 is CardContent.Todos -> TodoList(content.todos, store)
                 is CardContent.Unsupported -> Muted("这张卡片（${content.type}）需要更新 App 才能显示")
             }
+        }
+    }
+}
+
+@Composable
+private fun TimelineItem(item: ListItem, last: Boolean, tint: Color) {
+    val times = item.timeRange
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).alpha(if (item.state == "done") 0.45f else 1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.width(46.dp), horizontalAlignment = Alignment.End) {
+            Label(times?.first.orEmpty(), size = 13.sp, weight = FontWeight.SemiBold)
+            Muted(times?.second.orEmpty())
+        }
+        Canvas(Modifier.width(11.dp).fillMaxHeight()) {
+            val center = Offset(size.width / 2, 8.dp.toPx())
+            drawCircle(tint, 5.dp.toPx(), center, style = Stroke(2.dp.toPx()))
+            if (item.state == "now") drawCircle(tint, 2.dp.toPx(), center)
+            if (!last) drawLine(tint.copy(alpha = 0.28f), Offset(center.x, 14.dp.toPx()), Offset(center.x, size.height), 2.dp.toPx())
+        }
+        Column(Modifier.weight(1f).padding(bottom = if (last) 0.dp else 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Label(item.title, weight = if (item.state == "now") FontWeight.SemiBold else FontWeight.Normal)
+            if (times == null) item.subtitle?.let { Muted(it) }
+            item.detail?.let { Muted(it) }
+            if (item.state == "now") Label("正在进行", color = tint, size = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun RingItems(items: List<ListItem>, tint: Color) {
+    items.chunked(2).forEach { pair ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            pair.forEach { item ->
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val fraction = item.progress?.fraction ?: 0.0
+                    Box(Modifier.size(78.dp), contentAlignment = Alignment.Center) {
+                        Canvas(Modifier.fillMaxSize().padding(4.dp)) {
+                            drawCircle(tint.copy(alpha = 0.16f), style = Stroke(7.dp.toPx()))
+                            drawArc(tint, -90f, (fraction * 360).toFloat(), false, style = Stroke(7.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val parts = item.detail?.split(" / ")
+                            Label(parts?.firstOrNull() ?: "${kotlin.math.round(fraction * 100).toInt()}%", weight = FontWeight.SemiBold)
+                            parts?.getOrNull(1)?.let { Muted("/ $it") }
+                        }
+                    }
+                    Label(item.title, weight = FontWeight.SemiBold)
+                    item.subtitle?.let { Muted(it) }
+                }
+            }
+            if (pair.size == 1) Spacer(Modifier.weight(1f))
         }
     }
 }
@@ -461,8 +519,9 @@ private fun ChartView(chart: CardContent.Chart, tint: Color) {
                             val end = base + point.y
                             val barWidth = (step * 0.7f).coerceAtLeast(1f)
                             drawRect(color, Offset(x - barWidth / 2, minOf(y(end), y(base))), Size(barWidth, abs(y(end) - y(base))))
-                            if (!stacked && target != null && point.y > target.value) {
-                                drawRect(Color(0xFFFF9500), Offset(x - barWidth / 2, y(point.y)), Size(barWidth, (y(target.value) - y(point.y)).coerceAtLeast(0f)))
+                            val parts = chart.barParts(point.y)
+                            if (parts.excess > 0) {
+                                drawRect(Color(0xFFFF9500), Offset(x - barWidth / 2, y(point.y)), Size(barWidth, (y(parts.regular) - y(point.y)).coerceAtLeast(0f)))
                             }
                             if (!stacked) point.label?.let { painter.drawText(it, x, y(point.y) - 4.dp.toPx(), textPaint) }
                             accumulated[point.x] = end
@@ -496,12 +555,13 @@ private fun ChartView(chart: CardContent.Chart, tint: Color) {
 }
 
 private val chartColors = listOf(Color(0xFF007AFF), Color(0xFF34C759), Color(0xFFFF9500), Color(0xFFAF52DE), Color(0xFF30B0C7), Color(0xFFFF2D55), Color(0xFFFFCC00), Color(0xFF5856D6))
+private val donutColors = listOf(chartColors[2], chartColors[1], chartColors[0]) + chartColors.drop(3)
 
 @Composable
 private fun DonutChart(chart: CardContent.Chart) {
     val slices = chart.series.firstOrNull()?.points.orEmpty()
     val total = slices.sumOf { it.y.coerceAtLeast(0.0) }
-    val colors = listOf(chartColors[2], chartColors[1], chartColors[0]) + chartColors.drop(3)
+    val colors = donutColors
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(112.dp), contentAlignment = Alignment.Center) {
             Canvas(Modifier.fillMaxSize().padding(10.dp)) {
@@ -519,13 +579,11 @@ private fun DonutChart(chart: CardContent.Chart) {
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             slices.forEachIndexed { index, point ->
-                val percent = if (total > 0) point.y / total * 100 else 0.0
-                val share = if (percent > 0 && percent < 1) "<1%" else "${percent.toInt()}%"
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(colors[index % colors.size])
                     Column {
                         Label(point.x, size = 12.sp)
-                        Muted("${point.label ?: point.y.toString()} · $share")
+                        Muted("${point.display} · ${point.share(total)}")
                     }
                 }
             }

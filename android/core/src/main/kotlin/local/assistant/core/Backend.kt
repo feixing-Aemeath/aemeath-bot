@@ -1,11 +1,16 @@
 package local.assistant.core
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -13,6 +18,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 // Categories only. Neither exception messages nor logs contain server bodies or credentials.
 class APIError(val category: String, val statusCode: Int? = null) : Exception(category) {
@@ -63,6 +70,16 @@ abstract class Backend {
         "todos",
         query = paging(limit, offset) + listOfNotNull(status?.let { "status" to it }).toMap()
     )
+
+    suspend fun allTodos(): List<Todo> {
+        val rows = mutableListOf<Todo>()
+        while (true) {
+            val page = todos(offset = rows.size)
+            if (page.items.isEmpty() && rows.size < page.total) throw APIError("decoding")
+            rows += page.items
+            if (rows.size >= page.total) return rows.distinctBy { it.id }.filter { it.visible }
+        }
+    }
 
     suspend fun updateTodo(id: String, patch: JsonObject): Todo = send("PATCH", listOf("todos", id), patch)
 
@@ -174,6 +191,30 @@ class LiveBackend(
         }
         .build()
 
+    private suspend fun <T> execute(request: Request, read: (Response, () -> Unit) -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWithException(APIError("transport"))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val result = response.use {
+                            val checkActive: () -> Unit = { if (!continuation.isActive) throw CancellationException() }
+                            checkActive()
+                            read(it, checkActive)
+                        }
+                        continuation.resume(result)
+                    } catch (e: Exception) {
+                        continuation.resumeWithException(if (e is IOException) APIError("transport") else e)
+                    }
+                }
+            })
+        }
+
     override suspend fun raw(
         method: String,
         path: List<String>,
@@ -193,25 +234,19 @@ class LiveBackend(
                 ) else null
             )
             .build()
-        try {
-            client.newCall(request)
-                .execute()
-                .use { response ->
-                    if (!response.isSuccessful) throw APIError(
-                        when (response.code) {
-                            401 -> "unauthorized"
-                            403 -> "forbidden"
-                            404 -> "not_found"
-                            409 -> "conflict"
-                            422, 413 -> "invalid_request"
-                            else -> "server"
-                        },
-                        response.code
-                    )
-                    response.body?.bytes() ?: byteArrayOf()
-                }
-        } catch (_: IOException) {
-            throw APIError("transport")
+        execute(request) { response, _ ->
+            if (!response.isSuccessful) throw APIError(
+                when (response.code) {
+                    401 -> "unauthorized"
+                    403 -> "forbidden"
+                    404 -> "not_found"
+                    409 -> "conflict"
+                    422, 413 -> "invalid_request"
+                    else -> "server"
+                },
+                response.code
+            )
+            response.body?.bytes() ?: byteArrayOf()
         }
     }
 
@@ -221,25 +256,28 @@ class LiveBackend(
             .url(url(listOf("knowledge", "raw"), mapOf("path" to path)))
             .header("Authorization", "Bearer $credential")
             .build()
-        try {
-            client.newCall(request)
-                .execute()
-                .use { response ->
-                    if (!response.isSuccessful) throw APIError(
-                        when (response.code) {
-                            401 -> "unauthorized"
-                            403 -> "forbidden"
-                            404 -> "not_found"
-                            else -> "server"
-                        },
-                        response.code
-                    )
-                    val body = response.body ?: throw APIError("transport")
-                    body.byteStream().use { it.copyTo(output) }
+        execute(request) { response, checkActive ->
+            if (!response.isSuccessful) throw APIError(
+                when (response.code) {
+                    401 -> "unauthorized"
+                    403 -> "forbidden"
+                    404 -> "not_found"
+                    else -> "server"
+                },
+                response.code
+            )
+            val body = response.body ?: throw APIError("transport")
+            body.byteStream().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    checkActive()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    checkActive()
+                    output.write(buffer, 0, count)
                 }
+            }
             Unit
-        } catch (_: IOException) {
-            throw APIError("transport")
         }
     }
 

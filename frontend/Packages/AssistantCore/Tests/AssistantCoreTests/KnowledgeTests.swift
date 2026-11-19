@@ -100,6 +100,18 @@ final class KnowledgeTests: XCTestCase {
         XCTAssertEqual(entry.symbol, "doc.richtext")
     }
 
+    func testPrivateTopicAllowsBillUploadTypes() {
+        let types = [
+            "账单.CSV": "text/csv",
+            "账单.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "账单.zip": "application/zip",
+        ]
+        for (name, type) in types {
+            XCTAssertEqual(Knowledge.contentType(for: name, privateTopic: true), type)
+            XCTAssertNil(Knowledge.contentType(for: name, privateTopic: false))
+        }
+    }
+
     func testMockKeepsLockedReadersAndRefusesWhatTheAPIRefuses() async throws {
         let mock = MockBackend()
         let overview = try await mock.knowledge()

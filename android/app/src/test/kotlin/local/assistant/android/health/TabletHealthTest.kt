@@ -39,6 +39,21 @@ class TabletHealthTest {
     }
 
     @Test
+    @Config(qualifiers = "w412dp-h915dp-port-mdpi")
+    fun turningOffAutomaticUploadKeepsManualUploadAllowed() {
+        val settings = DeviceSettings(context)
+        settings.mock = false
+        settings.healthEnabled = false
+        val sync = HealthSync(context)
+        assertTrue(sync.canSync(automatic = false))
+        assertFalse(sync.canSync(automatic = true))
+        settings.healthEnabled = true
+        assertTrue(sync.canSync(automatic = true))
+        settings.mock = true
+        assertFalse(sync.canSync(automatic = false))
+    }
+
+    @Test
     fun tabletSelectionDoesNotOverwritePhoneSelection() {
         val prefs = context.getSharedPreferences("device", 0)
         prefs.edit().putString("chosen", "health").commit()

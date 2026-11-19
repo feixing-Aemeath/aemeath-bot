@@ -57,7 +57,8 @@ struct ScreenHelper {
             }
             try Permissions.checkScreen()
             try Permissions.checkInput()
-            let (image, title) = try await ChatReader(app: app, chat: chat).capture(page: page)
+            let reader = ChatReader(app: app, chat: chat, regionStore: output.regionStore(key: "\(app.id)-\(chat)"))
+            let (image, title) = try await reader.capture(page: page)
             let path = try output.save(image, name: "\(app.id)-chat")
             let atTop = page > 0 && output.sameAsLast(image, key: "\(app.id)-\(chat)")
             output.remember(image, key: "\(app.id)-\(chat)")
@@ -115,10 +116,15 @@ struct Request: Decodable {
 
 enum HelperError: Error {
     case invalidRequest, unknownApp, appNotRunning, windowNotFound, screenRecordingDenied
-    case accessibilityDenied, captureFailed, chatNotFound, chatNotOpen, pageNotOpen
+    case locked, loginWindow, sessionInactive, windowObscured
+    case accessibilityDenied, captureFailed, chatNotFound, chatNotOpen, chatAmbiguous, pageNotOpen
 
     var code: String {
         switch self {
+        case .locked: return "screen_locked"
+        case .loginWindow: return "screen_login_window"
+        case .sessionInactive: return "screen_session_inactive"
+        case .windowObscured: return "screen_window_obscured"
         case .invalidRequest: return "screen_invalid_request"
         case .unknownApp: return "screen_unknown_app"
         case .appNotRunning: return "screen_app_not_running"
@@ -128,6 +134,7 @@ enum HelperError: Error {
         case .captureFailed: return "screen_capture_failed"
         case .chatNotFound: return "screen_chat_not_in_list"
         case .chatNotOpen: return "screen_chat_not_open"
+        case .chatAmbiguous: return "screen_chat_ambiguous"
         case .pageNotOpen: return "screen_page_not_open"
         }
     }
@@ -226,11 +233,16 @@ struct Output {
         ]
     }
 
-    // Scrolling up when the chat is already at its first message changes nothing.
-    private func marker(_ key: String) -> URL {
+    private func hidden(_ prefix: String, _ key: String, suffix: String = "") -> URL {
         let safe = key.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }.joined()
-        return directory.appendingPathComponent(".last-\(safe)")
+        return directory.appendingPathComponent("\(prefix)\(safe)\(suffix)")
     }
+
+    // Scrolling up when the chat is already at its first message changes nothing.
+    private func marker(_ key: String) -> URL { hidden(".last-", key) }
+
+    /// Page 0's regions of one chat, for the pages after it (see RegionLock).
+    func regionStore(key: String) -> RegionStore { RegionStore(file: hidden(".regions-", key, suffix: ".json")) }
 
     func sameAsLast(_ image: CGImage, key: String) -> Bool {
         guard let previous = try? String(contentsOf: marker(key), encoding: .utf8) else { return false }

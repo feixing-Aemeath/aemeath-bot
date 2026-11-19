@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zipfile
 from pathlib import Path
 from typing import Protocol
 
@@ -52,6 +53,13 @@ class MacExtractor:
 
     def extract(self, path):
         if path.suffix.lower() == ".docx":
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    members = archive.infolist()
+                    if len(members) > 10_000 or sum(i.file_size for i in members) > MAX_FILE:
+                        raise ValueError("文档解压后过大")
+            except zipfile.BadZipFile:
+                raise ValueError("文档格式无效") from None
             result = subprocess.run(
                 ["/usr/bin/textutil", "-convert", "txt", "-stdout", str(path)],
                 capture_output=True,

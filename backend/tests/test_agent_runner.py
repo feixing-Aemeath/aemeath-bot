@@ -135,3 +135,23 @@ def test_health_reports_route_filters(service):
         assert ready["total"] == 1 and "input_json" not in ready["items"][0]
         assert client.get("/api/v1/health/reports?kind=daily").status_code == 422
         assert client.get("/api/v1/health/reports?date=2026-13-01").status_code == 422
+
+
+async def test_incomplete_harness_attempt_never_records_success(service, monkeypatch):
+    finished = []
+    finish_run = service.db.finish_run
+
+    def record(run_id, status="succeeded", error=None):
+        finished.append((status, error))
+        finish_run(run_id, status, error)
+
+    monkeypatch.setattr(service.db, "finish_run", record)
+    done = []
+    service.jobs.harnesses = {
+        "claude_code": Scripted(RunResult(True)),
+        "codex": Scripted(RunResult(True), effect=lambda: done.append(True)),
+    }
+    assert (
+        await service.jobs.run_agent("review", "合成任务", succeeded=lambda: bool(done)) == "codex"
+    )
+    assert finished == [("failed", "agent_incomplete"), ("succeeded", None)]

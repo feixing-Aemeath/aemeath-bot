@@ -7,7 +7,8 @@ window, Apple Vision reads it on this Mac and page.py turns the text into the we
 Every 10 minutes the backend reloads that tab through Chrome's AppleScript (`refresh`), so the
 site does not log the user out for being idle; a logged-out page has another title and is left
 alone. The screenshot stays in the plugin's data folder (a week);
-only times and course names are stored. Each read replaces the week it shows.
+only times and course names are stored. Each read replaces the week it shows; on the month view
+(月历), every week wholly inside that month.
 
 The page keeps showing the week it was opened on until it is reloaded, so a day of a week
 never read is taken from the latest week read before it, on the same weekday, marked 推测
@@ -55,7 +56,7 @@ GUESS_WEEKS = 4
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS timetable_entries (
   day TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, title TEXT NOT NULL,
-  kind TEXT NOT NULL, PRIMARY KEY (day, start_time, title));
+  kind TEXT NOT NULL, PRIMARY KEY (day, start_time, end_time, title));
 CREATE TABLE IF NOT EXISTS timetable_weeks (monday TEXT PRIMARY KEY, read_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS timetable_calendar_events (
   client_id TEXT PRIMARY KEY, event_id TEXT, payload_json TEXT NOT NULL, synced_json TEXT);
@@ -67,12 +68,17 @@ PROBLEMS = {
     "screen_app_not_running": "Chrome 没有打开。打开学校网站的个人日程（周历）后，半小时内会读到。",
     "screen_recording_denied": "屏幕读取助手没有屏幕录制权限：在 系统设置 → 隐私与安全性 → 屏幕与系统录音 里打开 "
     "screen-helper。",
-    "screen_locked": "Mac mini 锁屏了（显示器关掉后要密码），截不了图；解锁后会自己恢复。"
-    "想让夜里也能读，到 系统设置 → 锁定屏幕 把「屏幕保护程序启动或显示器关闭后需要密码」选「永不」。",
+    "screen_locked": "Mac mini 的显示器关了，系统跟着锁屏，截不了图；亮屏后会自己恢复。"
+    "插上 HDMI 欺骗器、把显示器设成不关之后，夜里也能读。",
     "screen_capture_failed": "截图没成功，多半是 Mac mini 的显示器关了或锁屏了；亮屏解锁后会自己恢复。",
-    "timetable_not_week_view": "页面不在「周历」，或者表头的星期没露出来（窗口被最小化、页面往下滚了）。点回「周历」就好。",
+    "timetable_not_week_view": "页面不在「周历」或「月历」，或者表头的星期没露出来（窗口被最小化、页面往下滚了）。点回「周历」就好。",
     "timetable_week_unreadable": "读不出页面显示的是哪一周：日期框和星期上面的日期都没读清。",
+    "timetable_month_unreadable": "读不出月历显示的是哪个月：日期框或每格的日期没读清。点回「周历」也能读。",
+    "timetable_entries_unreadable": "有课程的时间或名称没读完整，保留之前的课表。请把窗口放大、让课程完整显示后重试。",
 }
+# Problems that pass by themselves (the display turned off at night). While the coming week is
+# read already they change nothing, so they are not shown.
+PASSING = {"screen_locked", "screen_capture_failed"}
 
 
 async def reload_tabs(title):
@@ -120,7 +126,7 @@ def day_entries(db, day):
     if (monday - source).days > 7 * GUESS_WEEKS:
         return [], None
     rows = db.rows(
-        "SELECT * FROM timetable_entries WHERE day=? ORDER BY start_time, title",
+        "SELECT * FROM timetable_entries WHERE day=? ORDER BY start_time, title, end_time",
         ((source + timedelta(days=day.weekday())).isoformat(),),
     )
     return rows, (source if source != monday else None)
@@ -192,18 +198,26 @@ class Plugin(BasePlugin):
             problem = PROBLEMS.get(error, "在 Chrome 里打开学校网站的个人日程（周历）。")
         else:
             problem = "截图助手没能读完页面；后台会继续重试，一直不好的话让 Claude 查一下运行记录。"
+        # With the next seven days read (the month view gives a month at once), a failing read
+        # changes nothing yet: the page counts as fine, which also keeps the read job's own
+        # alert away, until a week before the classes run out.
         found = [
             {
                 "key": "page",
                 "title": "课表读不到了",
-                "ok_at": status.get("read_at"),
+                "ok_at": now.isoformat() if self.covered(now.date()) else status.get("read_at"),
                 "hours": 3,
                 "hint": problem.format(title=self.title, code=error),
                 "jobs": ["read"],
             }
         ]
         monday = now.date() - timedelta(days=now.weekday())
-        if not error and status.get("week") and date.fromisoformat(status["week"]) < monday:
+        if (
+            not error
+            and status.get("week")
+            and date.fromisoformat(status["week"]) < monday
+            and not self.exact(now.date())
+        ):
             found.append(
                 {
                     "key": "week",
@@ -280,7 +294,13 @@ class Plugin(BasePlugin):
         previous = self.status()
         try:
             _, blocks = await page.read_window(self.helper, self.shots, self.title)
-            week = page.parse_week(blocks, now.date())
+            try:
+                weeks = [page.parse_week(blocks, now.date())]
+            except page.PageError as error:
+                if str(error) != "timetable_not_week_view":
+                    raise
+                # The month view saves every week wholly inside the month at once.
+                weeks = page.parse_month(blocks)
         except Exception as error:
             code = code_of(error)
             self.context.put(STATUS, {**previous, "checked_at": now.isoformat(), "error": code})
@@ -289,15 +309,17 @@ class Plugin(BasePlugin):
             if code != previous.get("error"):
                 raise RuntimeError(code) from None
             return
-        await asyncio.to_thread(self.store_week, week, now)
+        for week in weeks:
+            await asyncio.to_thread(self.store_week, week, now)
         self.context.put(
             STATUS,
             {
                 "checked_at": now.isoformat(),
                 "error": None,
                 "read_at": now.isoformat(),
-                "week": week.monday.isoformat(),
-                "entries": len(week.entries),
+                # The last week read: the cards warn when it is older than this week.
+                "week": weeks[-1].monday.isoformat(),
+                "entries": sum(len(week.entries) for week in weeks),
             },
         )
 
@@ -329,6 +351,9 @@ class Plugin(BasePlugin):
                     continue
                 key = dump(["aemeath:timetable", day.isoformat(), row["start_time"], row["title"]])
                 client_id = str(uuid5(NAMESPACE_URL, key))
+                if client_id in desired:
+                    # Keep the established ID for a single class when its end time changes.
+                    client_id = str(uuid5(NAMESPACE_URL, dump([key, row["end_time"]])))
                 desired[client_id] = {
                     "client_id": client_id,
                     "calendar": "AI 课表",
@@ -412,6 +437,17 @@ class Plugin(BasePlugin):
         )
         return bool(rows)
 
+    def exact(self, day):
+        """Whether `day`'s own week was read (the week view or the month view), not guessed."""
+        monday = day - timedelta(days=day.weekday())
+        return bool(
+            self.db.rows("SELECT 1 FROM timetable_weeks WHERE monday=?", (monday.isoformat(),))
+        )
+
+    def covered(self, today):
+        """The next seven days are all read, so a read failing now changes none of them."""
+        return self.exact(today) and self.exact(today + timedelta(days=6))
+
     # The day's file, the cards and the Agent's tool ---------------------------------------
 
     async def daily(self, day):
@@ -457,18 +493,19 @@ class Plugin(BasePlugin):
 
     def _cards(self, now):
         status, cards = self.status(), []
-        if status.get("error"):
+        today = now.date()
+        covered, later = self.covered(today), None
+        if status.get("error") and not (status["error"] in PASSING and covered):
             problem = PROBLEMS.get(status["error"], "读取失败（{code}）。")
-            cards.append(
-                {
-                    "type": "text",
-                    "title": "课表没读到",
-                    "data": {
-                        "text": problem.format(title=self.title, code=status["error"]),
-                        "first": True,
-                    },
-                }
-            )
+            text = problem.format(title=self.title, code=status["error"])
+            card = {"type": "text", "title": "课表没读到", "data": {"text": text, "first": True}}
+            if covered:
+                # Something the user has to do (log in again), but the classes are right for a
+                # week yet: said last, not over today's classes.
+                card["data"] = {"text": text + "\n\n不急：接下来一周的课已经读到了。"}
+                later = card
+            else:
+                cards.append(card)
         if not status.get("read_at"):
             if not cards:
                 cards.append(
@@ -481,10 +518,15 @@ class Plugin(BasePlugin):
                     }
                 )
             return cards
-        today = now.date()
         shown = date.fromisoformat(status["week"]) if status.get("week") else None
-        if not status.get("error") and shown and shown < today - timedelta(days=today.weekday()):
-            # Read fine, but an old week: the page does not turn to the new week by itself.
+        if (
+            not status.get("error")
+            and shown
+            and shown < today - timedelta(days=today.weekday())
+            and not self.exact(today)
+        ):
+            # Read fine, but an old week: the page does not turn to the new week by itself. A
+            # week the month view gave already needs no turning.
             cards.append(
                 {
                     "type": "text",
@@ -522,10 +564,13 @@ class Plugin(BasePlugin):
                     }
                 )
             else:
-                data = {"text": "没有课。", **({"first": True} if day == today else {})}
+                data = {
+                    "text": "没有课。" if self.known(day) else "这一天的课表还没读到。",
+                    **({"first": True} if day == today else {}),
+                }
                 cards.append({"type": "text", "title": title, "data": data})
         cards.append(self.week_card(today, status))
-        return cards
+        return cards + ([later] if later else [])
 
     def week_card(self, today, status):
         """The week as a table (a row per start time, a column per weekday, Saturday and
@@ -540,11 +585,20 @@ class Plugin(BasePlugin):
             for offset, rows in enumerate(days)
             if rows
         ]
-        read_at = datetime.fromisoformat(status["read_at"]).astimezone(zone_of(self.context))
-        footnote = (
-            f"{day_text(read_at.date(), today)} {read_at:%H:%M} 读到 "
-            f"{week_label(date.fromisoformat(status['week']))} 那周。"
-        )
+        # Where this week's classes came from, not which week the page shows now: the month view
+        # may have given this week long before the page was left on an old one.
+        own = self.db.rows("SELECT read_at FROM timetable_weeks WHERE monday=?", (str(monday),))
+        if own:
+            read_at = datetime.fromisoformat(own[0]["read_at"]).astimezone(zone_of(self.context))
+            footnote = f"{day_text(read_at.date(), today)} {read_at:%H:%M} 读到这一周。"
+        elif guessed:
+            footnote = f"这周还没读到，按 {week_label(guessed)} 那周推测。"
+        else:
+            read_at = datetime.fromisoformat(status["read_at"]).astimezone(zone_of(self.context))
+            footnote = (
+                f"{day_text(read_at.date(), today)} {read_at:%H:%M} 读到 "
+                f"{week_label(date.fromisoformat(status['week']))} 那周。"
+            )
         title = "这周课表" + (f" · 按 {week_label(guessed)} 推测" if guessed else "")
         if not lines:
             empty = "这周没有课。" if self.known(monday) else "这周的课表还没读到。"

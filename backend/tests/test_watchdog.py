@@ -98,13 +98,72 @@ async def test_a_job_that_never_worked_counts_from_when_it_was_seen(watched):
     assert "job_failed" in todo["notes"]
 
 
-async def test_a_locked_screen_says_unlocking_fixes_it(watched):
+async def test_a_locked_screen_requires_unlocking_without_guessing_display_state(watched):
+    watched.plugins.platform = "macos"
     run(watched, "plugin:watched:read", "failed", NOW - timedelta(days=1), "screen_locked")
     await watched.watchdog.check(NOW)
     await watched.watchdog.check(NOW + timedelta(hours=3))
     [todo] = todos(watched)
-    assert "锁屏" in todo["notes"] and "解锁后会自己恢复" in todo["notes"]
-    assert "错误代码" not in todo["notes"]
+    assert "解锁" in todo["notes"] and "亮屏不等于解锁" in todo["notes"]
+    assert "显示器关了" not in todo["notes"]
+    assert "需要密码" not in todo["notes"] and "错误代码" not in todo["notes"]
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("screen_window_not_found", "Windows 电脑"),
+        ("screen_app_not_running", "Windows 电脑"),
+        ("screen_recording_denied", "普通权限"),
+        ("screen_accessibility_denied", "管理员"),
+        ("screen_locked", "登录选项"),
+        ("screen_capture_failed", "RDP"),
+        ("authentication_required", "Windows 电脑"),
+        ("apple_sync_failed", "Mac 后端"),
+        ("macos_required", "Mac 后端"),
+        ("screen_ocr_language_missing", "光学字符识别"),
+    ],
+)
+def test_windows_job_hints_match_windows_setup(watched, code, expected):
+    watched.plugins.platform = "windows"
+    hint = watched.watchdog.job_entry("plugin:watched:read", code, None)["hint"]
+    assert expected in hint
+    assert "Mac mini" not in hint and "系统设置" not in hint and "screen-helper" not in hint
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("screen_window_not_found", "Mac mini"),
+        ("screen_locked", "亮屏不等于解锁"),
+        ("screen_display_asleep", "HDMI 欺骗器"),
+        ("screen_recording_denied", "屏幕与系统录音"),
+        ("screen_accessibility_denied", "辅助功能"),
+        ("apple_sync_failed", "apple-sync"),
+        ("authentication_required", "Mac mini"),
+    ],
+)
+def test_macos_job_hints_keep_macos_instructions(watched, code, expected):
+    watched.plugins.platform = "macos"
+    assert expected in watched.watchdog.job_entry("plugin:watched:read", code, None)["hint"]
+
+
+def test_other_platform_job_hints_do_not_send_users_to_macos_settings(watched):
+    for code in ("screen_locked", "screen_capture_failed", "authentication_required"):
+        hint = watched.watchdog.job_entry("plugin:watched:read", code, None)["hint"]
+        assert "Mac mini" not in hint and "系统设置" not in hint
+    hint = watched.watchdog.job_entry("plugin:watched:read", "unknown_error", None)["hint"]
+    assert "错误代码 unknown_error" in hint
+
+
+async def test_windows_locked_screen_todo_has_windows_recovery_steps(watched):
+    watched.plugins.platform = "windows"
+    run(watched, "plugin:watched:read", "failed", NOW, "screen_locked")
+    await watched.watchdog.check(NOW)
+    await watched.watchdog.check(NOW + timedelta(hours=3))
+    [todo] = todos(watched)
+    assert "解锁后会自己恢复" in todo["notes"] and "登录选项" in todo["notes"]
+    assert "Mac mini" not in todo["notes"] and "系统设置" not in todo["notes"]
 
 
 async def test_a_plugins_watch_hook_reports_data_it_has_not_got(watched):
@@ -136,16 +195,18 @@ async def test_a_todo_checked_off_by_hand_stays_off_until_it_comes_back(watched)
     context = watched.plugins.context("watched")
     entry = {"key": "page", "title": "页面读不到了", "ok_at": None, "hours": 0, "hint": "打开页面"}
     context.put("watch", [entry])
-    await watched.watchdog.check(NOW)
+    # Local noon: run in the last half hour of a day, the final check would land on the next day.
+    noon = NOW.replace(hour=4, minute=0)
+    await watched.watchdog.check(noon)
     [todo] = todos(watched)
     await watched.update_todo(todo["id"], TodoPatch(status="completed"))
-    await watched.watchdog.check(NOW + timedelta(minutes=10))
+    await watched.watchdog.check(noon + timedelta(minutes=10))
     assert todos(watched)[0]["status"] == "completed"
     # Fixed, then broken again the same day: the same todo opens again.
     context.put("watch", [])
-    await watched.watchdog.check(NOW + timedelta(minutes=20))
+    await watched.watchdog.check(noon + timedelta(minutes=20))
     context.put("watch", [entry])
-    await watched.watchdog.check(NOW + timedelta(minutes=30))
+    await watched.watchdog.check(noon + timedelta(minutes=30))
     [again] = todos(watched)
     assert again["id"] == todo["id"] and again["status"] == "pending"
 
@@ -157,6 +218,55 @@ async def test_a_broken_hook_and_a_plugin_that_cannot_start(watched):
     assert [t["title"] for t in todos(watched)] == ["watched没能启动"]
     [failed] = [r for r in watched.store.runs()["items"] if r["job"] == "plugin:watched:watch"]
     assert failed["error"] == "plugin_watch_failed"
+
+
+async def test_broken_watch_hook_does_not_close_an_existing_alert(watched):
+    context = watched.plugins.context("watched")
+    context.put(
+        "watch",
+        [{"key": "page", "title": "页面读不到了", "ok_at": None, "hours": 0, "hint": "打开页面"}],
+    )
+    await watched.watchdog.check(NOW)
+    [todo] = todos(watched)
+    context.put("broken", True)
+    await watched.watchdog.check(NOW + timedelta(minutes=10))
+    assert watched.store.todo(todo["id"])["status"] == "pending"
+    await watched.watchdog.check(NOW + timedelta(hours=4))
+    assert any(t["title"] == "watched的「watch」任务一直失败" for t in todos(watched))
+    context.put("broken", False)
+    context.put("watch", [])
+    await watched.watchdog.check(NOW + timedelta(hours=4, minutes=10))
+    assert {t["status"] for t in todos(watched)} == {"completed"}
+
+
+async def test_invalid_manifest_does_not_stop_the_watchdog(watched):
+    make_plugin(watched.plugins.directory, "invalid", provides=None)
+    await watched.plugins.discover()
+    watched.plugins.errors["watched"] = "plugin_setup_failed"
+    await watched.watchdog.check(NOW)
+    assert [t["title"] for t in todos(watched)] == ["watched没能启动"]
+
+
+@pytest.mark.parametrize(
+    "invalid", [{"ok_at": "2026-11-01T00:00:00"}, {"hours": "nan"}, {"hours": -1}]
+)
+async def test_invalid_watch_data_is_isolated(watched, invalid):
+    watched.plugins.context("watched").put(
+        "watch",
+        [
+            {
+                "key": "page",
+                "title": "页面读不到了",
+                "ok_at": None,
+                "hours": 3,
+                "hint": "打开页面",
+                **invalid,
+            }
+        ],
+    )
+    await watched.watchdog.check(NOW)
+    assert todos(watched) == []
+    assert any(r["error"] == "plugin_watch_failed" for r in watched.store.runs()["items"])
 
 
 # The plugins' hooks ----------------------------------------------------------------------------
@@ -208,10 +318,10 @@ async def test_screen_plugins_watch_cut_off_chats(service, tmp_path):
     plugin.app_name = "QQ"
     plugin.context, plugin.config = service.plugins.context("qq_screen"), {}
     assert await plugin.watch() == []
-    plugin.context.put("cut_off_chats", ["人工智能学院2026…"])
+    plugin.context.put("cut_off_chats", ["信息学院2026…"])
     [entry] = await plugin.watch()
     assert entry["title"] == "QQ有群名被截断，没有读"
-    assert entry["hint"].endswith("人工智能学院2026…") and entry["ok_at"] is None
+    assert entry["hint"].endswith("信息学院2026…") and entry["ok_at"] is None
 
 
 def test_the_watchdog_runs_every_ten_minutes(service):

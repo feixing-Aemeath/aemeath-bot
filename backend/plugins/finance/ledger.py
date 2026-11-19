@@ -275,27 +275,41 @@ class Ledger:
         `record` (the import's own row) goes in the same transaction."""
         rows = [self.prepare(statement.source, r, import_id, clock) for r in statement.rows]
         # One allowance a period, the first: another large transfer that week is something else.
+        # An allowance the user told 记账 about before the statement came is this one: the
+        # bank's row takes its place, or it would become income, and family income can be
+        # matched as a reimbursement.
         day = self.config.get("allowance_day", 1)
-        taken = {
-            allowance_anchor(self.day(r), day) for r in self.rows() if r["kind"] == "allowance"
-        }
+        taken = {}
+        for r in self.rows(visible=True):
+            if r["kind"] == "allowance":
+                taken.setdefault(allowance_anchor(self.day(r), day), r)
+        told = []
         for row in sorted(rows, key=lambda r: r["occurred_at"]):
             if row["kind"] == "allowance":
                 anchor = allowance_anchor(self.day(row), day)
-                if anchor in taken and not self.db.rows(
+                holder = taken.get(anchor)
+                if holder and not self.db.rows(
                     "SELECT 1 FROM finance_transactions WHERE source=? AND source_id=?",
                     (row["source"], row["source_id"]),
                 ):
-                    row["kind"] = "income"
-                taken.add(anchor)
+                    if holder["source"] == "manual":
+                        told.append((row["id"], holder["id"]))
+                    else:
+                        row["kind"] = "income"
+                taken[anchor] = row
         with self.db.connect() as conn:
             if record:
                 conn.execute(*record)
             count = sum(self.insert(conn, row) for row in rows)
+            for bank, manual in told:
+                conn.execute(
+                    "UPDATE finance_transactions SET linked_id=? WHERE id=? AND linked_id IS NULL",
+                    (bank, manual),
+                )
             for account, cents in statement.balances.items():
                 conn.execute(
                     "INSERT OR REPLACE INTO finance_balances VALUES(?,?,?,'statement')",
-                    (account, str(statement.end), cents),
+                    (account, str(statement.balance_dates.get(account, statement.end)), cents),
                 )
         self.reconcile()
         return count
@@ -354,6 +368,7 @@ class Ledger:
         # Stable one-to-one matches; ambiguous equal-amount candidates remain visible.
         with self.db.connect() as conn:
             used = {r["linked_id"] for r in rows if r["linked_id"]}
+            bank_matches = {}
             for bank in rows:
                 # The bank names the merchant, not 财付通 or 支付宝, for a WeChat or Alipay
                 # payment from the card; the platform names the card with its last digits.
@@ -372,17 +387,22 @@ class Ledger:
                     and (p["direction"] == bank["direction"] or p["kind"] == "transfer")
                     and abs((self.day(p) - self.day(bank)).days) <= 2
                 ]
-                if len(candidates) == 1:
+                bank_matches[bank["id"]] = candidates
+            for bank in rows:
+                candidates = bank_matches.get(bank["id"], [])
+                if (
+                    len(candidates) == 1
+                    and sum(candidates[0] in options for options in bank_matches.values()) == 1
+                ):
                     p = candidates[0]
                     bank["linked_id"] = p["id"]
-                    used.add(p["id"])
                     conn.execute(
                         "UPDATE finance_transactions SET linked_id=? WHERE id=?",
                         (p["id"], bank["id"]),
                     )
                     self.carry(conn, bank, p)
             # Manual notes follow the imported transaction, including after a bank link.
-            used_manual = set()
+            manual_matches = {}
             for manual in rows:
                 if manual["source"] != "manual" or manual["kind"] != "spend":
                     continue
@@ -390,7 +410,7 @@ class Ledger:
                 candidates = [
                     p
                     for p in rows
-                    if p["source"] != "manual"
+                    if p["source"] not in {"manual", "split"}
                     and not p["linked_id"]
                     and p["kind"] == "spend"
                     and p["amount_cents"] == manual["amount_cents"]
@@ -401,16 +421,20 @@ class Ledger:
                         ).total_seconds()
                     )
                     <= 86400
-                    and p["id"] not in used_manual
                 ]
                 if existing:
                     target = next((p for p in rows if p["id"] == existing), None)
                     if target and target["linked_id"]:
                         existing = target["linked_id"]
                     candidates = [p for p in rows if p["id"] == existing]
-                if len(candidates) == 1:
+                manual_matches[manual["id"]] = candidates
+            for manual in rows:
+                candidates = manual_matches.get(manual["id"], [])
+                if len(candidates) == 1 and (
+                    manual["linked_id"]
+                    or sum(candidates[0] in options for options in manual_matches.values()) == 1
+                ):
                     p = candidates[0]
-                    used_manual.add(p["id"])
                     manual["linked_id"] = p["id"]
                     conn.execute(
                         "UPDATE finance_transactions SET linked_id=? WHERE id=?",
@@ -440,13 +464,38 @@ class Ledger:
                     if manual["big"]:
                         p["big"] = 1
                         conn.execute("UPDATE finance_transactions SET big=1 WHERE id=?", (p["id"],))
+                    self.carry_split(conn, manual, p)
+            by_id = {r["id"]: r for r in rows}
+
+            def survivor(row):
+                while row["linked_id"]:
+                    row = by_id[row["linked_id"]]
+                return row
+
+            for row in rows:
+                kept = survivor(row)
+                if row["kind"] == "spend" and kept is not row:
+                    for field in ("full_refund", "refunded_cents"):
+                        if row[field] > kept[field]:
+                            kept[field] = row[field]
+                            conn.execute(
+                                f"UPDATE finance_transactions SET {field}=? WHERE id=?",
+                                (kept[field], kept["id"]),
+                            )
+                if row["refund_of"]:
+                    purchase = survivor(by_id[row["refund_of"]])
+                    kept["refund_of"] = purchase["id"]
+                    conn.execute(
+                        "UPDATE finance_transactions SET refund_of=? WHERE id=?",
+                        (purchase["id"], kept["id"]),
+                    )
             visible = [r for r in rows if not r["linked_id"]]
             for refund in visible:
                 if refund["kind"] != "refund" or refund["refund_of"]:
                     continue
                 candidates = [
                     p
-                    for p in visible
+                    for p in rows
                     if p["source"] == refund["source"]
                     and p["kind"] == "spend"
                     and self.day(refund) >= self.day(p)
@@ -456,7 +505,7 @@ class Ledger:
                 if not candidates and refund["merchant_id"]:
                     candidates = [
                         p
-                        for p in visible
+                        for p in rows
                         if p["source"] == refund["source"]
                         and p["kind"] == "spend"
                         and self.day(refund) >= self.day(p)
@@ -465,7 +514,7 @@ class Ledger:
                 if not candidates:
                     candidates = [
                         p
-                        for p in visible
+                        for p in rows
                         if p["kind"] == "spend"
                         and p["source"] == refund["source"]
                         and refund["counterpart"]
@@ -498,6 +547,7 @@ class Ledger:
                         )
                     ]
                     candidates = candidates[-1:]  # the latest purchase before the refund
+                candidates = list({survivor(p)["id"]: survivor(p) for p in candidates}.values())
                 if len(candidates) == 1:
                     refund["refund_of"] = candidates[0]["id"]
                     conn.execute(
@@ -581,8 +631,33 @@ class Ledger:
                 f"UPDATE finance_transactions SET {','.join(k + '=?' for k in moved)} WHERE id=?",
                 (*moved.values(), platform["id"]),
             )
+        Ledger.carry_split(conn, bank, platform)
 
-    def categorize(self, identity, category, remember):
+    @staticmethod
+    def carry_split(conn, old, kept):
+        """A split belongs to the surviving charge too. Keep an existing split on the survivor
+        if the user already split both copies of the same payment."""
+        if not old["split_cents"]:
+            return
+        if kept["split_cents"]:
+            conn.execute(
+                "DELETE FROM finance_transactions WHERE source='split' AND source_id=?",
+                (old["id"],),
+            )
+        else:
+            conn.execute(
+                "UPDATE finance_transactions SET source_id=? WHERE source='split' AND source_id=?",
+                (kept["id"], old["id"]),
+            )
+            kept["split_cents"] = old["split_cents"]
+            conn.execute(
+                "UPDATE finance_transactions SET split_cents=? WHERE id=?",
+                (kept["split_cents"], kept["id"]),
+            )
+        old["split_cents"] = 0
+        conn.execute("UPDATE finance_transactions SET split_cents=0 WHERE id=?", (old["id"],))
+
+    def categorize(self, identity, category, remember, clock):
         if category not in CATEGORIES:
             raise FinanceError("类别无效")
         row = self.get(identity)
@@ -595,8 +670,8 @@ class Ledger:
                 # A part split off keeps the category it was given.
                 conn.execute(
                     "UPDATE finance_transactions SET category=?,category_override=1 "
-                    "WHERE counterpart=? AND source!='split'",
-                    (category, row["counterpart"]),
+                    "WHERE counterpart=? AND (source!='split' OR id=?)",
+                    (category, row["counterpart"], row["id"]),
                 )
             else:
                 conn.execute(
@@ -608,6 +683,7 @@ class Ledger:
                 "UPDATE finance_transactions SET category=?,category_override=0 WHERE linked_id=? AND source='manual'",
                 (category, row["id"]),
             )
+        self.refresh_reimburse(clock)
         return self.get(row["id"])
 
     def change_kind(self, identity, kind):
@@ -650,7 +726,7 @@ class Ledger:
             for r in rows
             if r["kind"] == "spend"
             and r["big"]
-            and r["reimburse"] not in {"yes", "reimbursed"}
+            and r["reimburse"] not in {"ask", "yes", "reimbursed"}
             and start <= self.day(r) <= end
         ]
 
@@ -697,6 +773,7 @@ class Ledger:
             )
             if part:
                 self.insert(conn, part)
+        self.reconcile()
         return {"charge": self.get(row["id"]), "part": part and self.get(part["id"])}
 
     def reimburse(self, ids, decision):
@@ -781,12 +858,15 @@ class Ledger:
                 rows += cards
             elif total:
                 rows.append(total)
+        told = self.told_allowances(rows)
         accounts = [
             {
                 "account": r["account"],
-                "amount_cents": r["amount_cents"],
+                "amount_cents": r["amount_cents"]
+                + sum(a["amount_cents"] for a in told.get(r["account"], [])),
                 "as_of": r["at"],
                 "origin": r["origin"],
+                **({"allowances": told[r["account"]]} if r["account"] in told else {}),
             }
             for r in sorted(rows, key=lambda r: r["account"])
         ]
@@ -794,8 +874,37 @@ class Ledger:
             "accounts": accounts,
             "total_cents": sum(a["amount_cents"] for a in accounts),
             "as_of": min((a["as_of"] for a in accounts), default=None),
-            "note": "各账户是最近一次知道的余额，截至各自的日期；之后的收支不在里面。",
+            "note": "各账户是最近一次知道的余额，截至各自的日期；之后跟记账说过的生活费到账已经加上"
+            "（allowances），其他收支不在里面。",
         }
+
+    def told_allowances(self, balances):
+        """Allowances the user told 记账 about after an account's balance, by account: they
+        arrive on the card the bank's statements showed the last one on (or that bank's total).
+        Once a statement brings the same allowance, its row replaces the told one and its
+        balance is newer, so nothing is counted twice."""
+        card = next(
+            (
+                r["method"]
+                for r in reversed(self.rows())
+                if r["kind"] == "allowance" and r["source"] != "manual" and card_digits(r["method"])
+            ),
+            None,
+        )
+        if card is None:
+            return {}
+        accounts = {r["account"]: r for r in balances}
+        balance = accounts.get(card) or accounts.get(card.split("(")[0])
+        if balance is None:
+            return {}
+        told = [
+            {"day": str(self.day(r)), "amount_cents": r["amount_cents"]}
+            for r in self.rows(visible=True)
+            if r["source"] == "manual"
+            and r["kind"] == "allowance"
+            and str(self.day(r)) > balance["at"]
+        ]
+        return {balance["account"]: told} if told else {}
 
     def sources(self):
         """The sources the user uses, and any other that has data anyway."""
@@ -839,7 +948,7 @@ class Ledger:
         for r in rows:
             if r["kind"] == "refund" and r["refund_of"] and self.day(r) <= as_of:
                 refunds[r["refund_of"]] = refunds.get(r["refund_of"], 0) + r["amount_cents"]
-        return {
+        net = {
             r["id"]: (
                 # WeChat's status on the purchase and the matched refund rows tell the same
                 # refund twice; count it once.
@@ -847,10 +956,19 @@ class Ledger:
                 if r["full_refund"]
                 else max(
                     0,
-                    r["amount_cents"]
-                    - r["split_cents"]
-                    - max(r["refunded_cents"], refunds.get(r["id"], 0)),
+                    r["amount_cents"] - max(r["refunded_cents"], refunds.get(r["id"], 0)),
                 )
+            )
+            for r in rows
+            if r["kind"] == "spend"
+        }
+        # Refunds reduce the remainder first, then the split part. Their combined cost must
+        # never exceed the original payment's net cost, including after a full refund.
+        return {
+            r["id"]: (
+                min(net[r["id"]], net[r["source_id"]])
+                if r["source"] == "split" and r["source_id"] in net
+                else max(0, net[r["id"]] - r["split_cents"])
             )
             for r in rows
             if r["kind"] == "spend"

@@ -225,7 +225,7 @@ async def test_plugin_tool_names_cannot_shadow_core_tools(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     core = {t.name for t in await create_mcp(Service(settings("a"), plugin_dir=empty)).list_tools()}
-    assert len(core) == 12
+    assert len(core) == 14
     root = tmp_path / "plugins"
     groups = defaultdict(list)
     for name in core:
@@ -322,3 +322,31 @@ def test_bundled_plugins_declare_their_mascot(service):
     for view in views.values():
         if view["mascot"] and view["mascot"]["sticker"]:
             assert (stickers / f"{view['mascot']['sticker']}.png").is_file(), view["id"]
+
+
+async def test_patch_waiting_for_plugin_delete_cannot_reenable_it(service):
+    await service.start()
+    try:
+        lock = service.plugins.locks["campus"]
+        async with lock:
+            delete = asyncio.create_task(service.plugins.delete("campus"))
+            patch = asyncio.create_task(service.plugins.patch("campus", PluginPatch(enabled=True)))
+            await asyncio.sleep(0)
+        await delete
+        with pytest.raises(KeyError):
+            await patch
+        assert "campus" not in service.plugins.instances
+        assert not any(j.startswith("plugin:campus:") for j in service.jobs.callbacks)
+        assert service.plugins.row("campus")["enabled"] == 0
+    finally:
+        await service.close()
+
+
+@pytest.mark.parametrize("private", ["a24_" + "a" * 43, "Bring the documents", "x" * 61])
+async def test_job_failure_never_persists_private_text_that_looks_like_a_code(service, private):
+    async def failed():
+        raise RuntimeError(private)
+
+    service.db.put("settings", RuntimeSettings(retry_attempts=1).model_dump())
+    await service.jobs._run("synthetic", failed)
+    assert service.db.rows("SELECT error FROM runs") == [{"error": "job_failed"}]

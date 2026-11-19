@@ -34,13 +34,11 @@
         private let health = HKHealthStore()
         private weak var store: AppStore?
         private var observing = false
+        private var lifecycle: HealthSyncLifecycle?
         private let defaults = UserDefaults.standard
 
         init() {
             asked = defaults.bool(forKey: "health.asked")
-            let stamp = defaults.double(forKey: "health.lastSync")
-            lastSync = stamp > 0 ? Date(timeIntervalSince1970: stamp) : nil
-            lastCount = defaults.integer(forKey: "health.lastCount")
         }
 
         public var available: Bool {
@@ -51,12 +49,18 @@
         public func attach(_ store: AppStore) {
             guard available else { return }
             self.store = store
+            let progress = HealthSyncState(backend: store.connection.baseURL, defaults: defaults)
+            lastSync = progress.lastSync
+            lastCount = progress.lastCount
+            lifecycle = HealthSyncLifecycle(foreground: UIApplication.didBecomeActiveNotification) { [weak self] in
+                await self?.sync(force: false)
+            }
             if asked { observe() }
             Task {
                 // Wait for the first refresh, so a real backend is known before asking.
                 try? await Task.sleep(for: .seconds(3))
                 if !self.asked, !store.connection.useMockData { await self.requestAccess() }
-                await self.sync(force: false)
+                await self.lifecycle?.start()
             }
         }
 
@@ -77,22 +81,26 @@
             }
         }
 
-        /// Uploads what is new. `force` ignores the few-minutes gap (设置's button).
+        /// Uploads what is new. `force` ignores the few-minutes gap (设置's button). A backend
+        /// this phone has not uploaded to has no anchors, so it gets the first `firstDays`.
         public func sync(force: Bool) async {
             guard available, asked, !syncing, let store, !store.connection.useMockData else { return }
+            let backend = store.backend
+            let progress = HealthSyncState(backend: store.connection.baseURL, defaults: defaults)
+            lastSync = progress.lastSync
+            lastCount = progress.lastCount
             if !force, let lastSync, Date().timeIntervalSince(lastSync) < Self.minimumGap { return }
             syncing = true
             defer { syncing = false }
             var sent = 0
             do {
                 for kind in Self.kinds {
-                    sent += try await sync(kind, to: store.backend)
+                    sent += try await sync(kind, to: backend, progress: progress)
                 }
                 problem = nil
                 lastSync = Date()
                 lastCount = sent
-                defaults.set(lastSync?.timeIntervalSince1970, forKey: "health.lastSync")
-                defaults.set(sent, forKey: "health.lastCount")
+                progress.finished(at: lastSync!, count: sent)
             } catch let error as APIError {
                 problem = "上传失败：\(error.localizedDescription)"
             } catch {
@@ -102,8 +110,8 @@
 
         // MARK: One type
 
-        private func sync(_ kind: Kind, to backend: any Backend) async throws -> Int {
-            var anchor = loadAnchor(kind)
+        private func sync(_ kind: Kind, to backend: any Backend, progress: HealthSyncState) async throws -> Int {
+            var anchor = loadAnchor(kind, progress: progress)
             let start = Calendar.current.date(byAdding: .day, value: -Self.firstDays, to: Date())
             let predicate = anchor == nil ? HKQuery.predicateForSamples(withStart: start, end: nil) : nil
             var sent = 0
@@ -113,28 +121,22 @@
                     limit: Self.pageSize)
                 let result = try await query.result(for: health)
                 let samples = result.addedSamples.compactMap(kind.sample)
-                for start in stride(from: 0, to: samples.count, by: Self.batchSize) {
-                    let batch = Array(samples[start..<min(start + Self.batchSize, samples.count)])
-                    _ = try await backend.uploadHealth(HealthBatch(samples: batch))
+                let page = HealthUploadPage(
+                    samples: samples, deleted: result.deletedObjects.map { $0.uuid.uuidString },
+                    anchor: try NSKeyedArchiver.archivedData(withRootObject: result.newAnchor, requiringSecureCoding: true),
+                    addedCount: result.addedSamples.count)
+                try await page.upload(kind: kind.type.identifier, progress: progress, batchSize: Self.batchSize) { batch in
+                    _ = try await backend.uploadHealth(batch)
                 }
                 sent += samples.count
                 anchor = result.newAnchor
-                saveAnchor(result.newAnchor, kind)
-                if result.addedSamples.count < Self.pageSize { return sent }
+                if !page.hasMore(pageSize: Self.pageSize) { return sent }
             }
         }
 
-        private func anchorKey(_ kind: Kind) -> String { "health.anchor.\(kind.type.identifier)" }
-
-        private func loadAnchor(_ kind: Kind) -> HKQueryAnchor? {
-            guard let data = defaults.data(forKey: anchorKey(kind)) else { return nil }
+        private func loadAnchor(_ kind: Kind, progress: HealthSyncState) -> HKQueryAnchor? {
+            guard let data = progress.anchor(for: kind.type.identifier) else { return nil }
             return try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data)
-        }
-
-        private func saveAnchor(_ anchor: HKQueryAnchor, _ kind: Kind) {
-            if let data = try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true) {
-                defaults.set(data, forKey: anchorKey(kind))
-            }
         }
 
         // MARK: Background delivery
@@ -151,6 +153,7 @@
                     }
                     Task { @MainActor in
                         await HealthSync.shared.sync(force: true)
+                        await PhoneReach.shared.refresh()
                         done()
                     }
                 }

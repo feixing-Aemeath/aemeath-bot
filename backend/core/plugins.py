@@ -10,6 +10,7 @@ import jsonschema
 import yaml
 from apscheduler.triggers.cron import CronTrigger
 
+from core import charts
 from core.db import dump, now
 from core.models import Card, MessageInput, PluginManifest
 from core.platforms import platform_name
@@ -30,6 +31,7 @@ class PluginContext:
     # (reader, secret): hides something the user typed to that Bot, e.g. a zip password
     # (Chat.redact).
     redact_chat: object = None
+    chat: object = None
 
     def get(self, key, default=None):
         return self.store.db.get(f"plugin:{self.plugin_id}:{key}", default)
@@ -56,6 +58,10 @@ class Plugin:
     async def cards(self):
         return []
 
+    def charts(self):
+        """Charts drawn on request for a chat reply: {name: spec}, see core/charts.py."""
+        return {}
+
     async def teardown(self):
         pass
 
@@ -71,6 +77,7 @@ class PluginManager:
         self.run_agent = None
         self.apple_call = None
         self.redact_chat = None
+        self.chat = None
 
     def context(self, identifier):
         return PluginContext(
@@ -82,6 +89,7 @@ class PluginManager:
             apple_call=self.apple_call,
             get_plugin=self.instances.get,
             redact_chat=self.redact_chat,
+            chat=self.chat,
         )
 
     async def discover(self):
@@ -169,21 +177,24 @@ class PluginManager:
             raise
         self.instances[identifier] = instance
 
-    async def _disable(self, identifier):
+    async def _disable(self, identifier, *, disabling=False):
         if self.cancel_jobs:
             await self.cancel_jobs(identifier)
         instance = self.instances.pop(identifier, None)
         if instance:
             try:
+                if disabling and hasattr(instance, "disabled"):
+                    await asyncio.wait_for(instance.disabled(), 10)
                 await asyncio.wait_for(instance.teardown(), 10)
             except Exception:
                 run = self.store.db.start_run(f"plugin:{identifier}:teardown")
                 self.store.db.finish_run(run, "failed", "plugin_teardown_failed")
 
     async def patch(self, identifier, patch):
-        self.view(identifier)
         async with self.locks[identifier]:
             row = self.row(identifier)
+            if row["deleted"]:
+                raise KeyError("plugin_not_found")
             config = patch.config if patch.config is not None else json.loads(row["config_json"])
             enabled = patch.enabled if patch.enabled is not None else bool(row["enabled"])
             jsonschema.validate(config, self.manifests[identifier]["config_schema"])
@@ -194,7 +205,7 @@ class PluginManager:
                 validate_config(config)
             if enabled and not self.supported(identifier):
                 raise ConflictError("unsupported_platform")
-            await self._disable(identifier)
+            await self._disable(identifier, disabling=not enabled)
             self.errors.pop(identifier, None)
             self.store.db.execute(
                 "UPDATE plugins SET enabled=?,config_json=? WHERE id=?",
@@ -212,9 +223,10 @@ class PluginManager:
             return self.view(identifier)
 
     async def delete(self, identifier):
-        self.view(identifier)
         async with self.locks[identifier]:
-            await self._disable(identifier)
+            if self.row(identifier)["deleted"]:
+                raise KeyError("plugin_not_found")
+            await self._disable(identifier, disabling=True)
             self.store.db.execute(
                 "UPDATE plugins SET enabled=0,deleted=1 WHERE id=?", (identifier,)
             )
@@ -246,13 +258,48 @@ class PluginManager:
             return []
         try:
             return [
-                Card.model_validate(c).model_dump()
+                Card.model_validate(c).model_copy(update={"plugin": identifier}).model_dump()
                 for c in await asyncio.wait_for(instance.cards(), 10)
             ]
         except Exception:
             run = self.store.db.start_run(f"plugin:{identifier}:cards")
             self.store.db.finish_run(run, "failed", "plugin_cards_failed")
             return []
+
+    def charts(self, identifier):
+        """A running plugin's chart presets that the core can offer; a broken one is left out
+        and recorded as a failed run."""
+        instance = self.instances.get(identifier)
+        if not instance:
+            return {}
+        try:
+            presets = instance.charts()
+            offered = {name: spec for name, spec in presets.items() if charts.valid(name, spec)}
+            broken = len(offered) != len(presets)
+        except Exception:
+            offered, broken = {}, True
+        if broken:
+            run = self.store.db.start_run(f"plugin:{identifier}:charts")
+            self.store.db.finish_run(run, "failed", "plugin_charts_failed")
+        return offered
+
+    async def chart(self, identifier, name, params):
+        """One preset drawn with these parameters, as a card naming its plugin; None when the
+        plugin has nothing to draw or fails. KeyError for an unknown preset, ValueError for
+        parameters it does not take."""
+        spec = self.charts(identifier).get(name)
+        if spec is None:
+            raise KeyError("chart_not_found")
+        chosen = charts.values(spec, params)
+        try:
+            card = await asyncio.wait_for(spec["build"](chosen), 10)
+            if card is None:
+                return None
+            return Card.model_validate(card).model_copy(update={"plugin": identifier}).model_dump()
+        except Exception:
+            run = self.store.db.start_run(f"plugin:{identifier}:charts")
+            self.store.db.finish_run(run, "failed", "plugin_chart_failed")
+            return None
 
     def hooks(self, kind):
         result = {}
@@ -276,3 +323,17 @@ class PluginManager:
     async def close(self):
         for identifier in list(self.instances):
             await self._disable(identifier)
+
+    async def notify(self, hook, *args):
+        """Optional event hooks are isolated just like fetch and cards."""
+        for identifier, instance in list(self.instances.items()):
+            method = getattr(instance, hook, None)
+            if method is None:
+                continue
+            try:
+                result = await method(*args)
+                if result is not None:
+                    return result
+            except Exception:
+                run = self.store.db.start_run(f"plugin:{identifier}:{hook}")
+                self.store.db.finish_run(run, "failed", "plugin_hook_failed")

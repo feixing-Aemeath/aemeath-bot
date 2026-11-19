@@ -155,6 +155,17 @@ def test_stressed_days_score_lower(synthetic):
     assert today["score"] == round(expected / sum(READINESS_WEIGHTS.values()), 1)
 
 
+def test_partial_training_days_do_not_make_readiness_reliable():
+    rows = rows_with("trimp", [50] * 29)
+    for offset in range(1, 4):
+        rows[DAY - timedelta(days=offset)]["metrics"]["trimp"] = entry(0, "partial")
+    subject = analyzer(rows)
+    part = readiness(subject, DAY)["components"]["training_load"]
+    assert part["score"] is None and part["reason"] == "acute_unreliable"
+    load = subject.training(DAY - timedelta(days=1), {"value": 190, "source": "config"})
+    assert load["acute_missing_days"] == 3 and load["acwr_reference"] is None
+
+
 def test_readiness_reaches_the_agent_and_may_be_cited(synthetic):
     bundle = build_input(synthetic, "morning", END, END)
     today = bundle["daily"]["days"][-1]

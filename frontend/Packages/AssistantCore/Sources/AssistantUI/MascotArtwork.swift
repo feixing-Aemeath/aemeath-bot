@@ -30,7 +30,17 @@ final class StickerImages: @unchecked Sendable {
     }
 
     static func decode(_ url: URL) -> Image? {
-        #if canImport(UIKit)
+        #if os(watchOS)
+            // Drawn at most a few dozen points wide here, and the full 1024 pixels cost 4 MB each.
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 256,
+                kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true,
+            ]
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+            else { return nil }
+            return Image(decorative: image, scale: 1)
+        #elseif canImport(UIKit)
             guard let image = UIImage(contentsOfFile: url.path) else { return nil }
             return Image(uiImage: image)
         #elseif canImport(AppKit)

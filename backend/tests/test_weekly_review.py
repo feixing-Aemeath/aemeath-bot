@@ -1,6 +1,8 @@
 """Weekly aggregates and review delivery, entirely with temporary data and fake Agents."""
 
+import asyncio
 import json
+import threading
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from mcp.server.fastmcp.exceptions import ToolError
 
 from core.db import uid
+from core.extraction_stats import extraction_stats
 from core.mcp_server import create_mcp
 from core.models import HealthBatch, PluginPatch, RuntimeSettings
 from harness.base import RunResult, Usage
@@ -92,7 +95,7 @@ async def test_missing_and_disabled_plugins(weekly):
     service, mcp, _ = weekly
     data = await call(mcp, "weekly_review_input", {})
     assert (data["from"], data["to"], data["week"]) == ("2026-10-26", "2026-11-01", "2026-W44")
-    for key in ("todos", "homework", "timetable", "activities", "health", "tokens"):
+    for key in ("todos", "homework", "timetable", "activities", "health"):
         assert data[key]["status"] == "没有数据"
     assert data["next_week"]["todos"] == "没有数据"
     todo(service, "数学作业")
@@ -100,6 +103,14 @@ async def test_missing_and_disabled_plugins(weekly):
     assert (await call(mcp, "weekly_review_input", {}))["homework"]["status"] == "ok"
     await service.plugins.patch("homework", PluginPatch(enabled=False))
     assert (await call(mcp, "weekly_review_input", {}))["homework"] == {"status": "没有数据"}
+
+
+async def test_cancelled_tasks_leave_next_week_without_data(weekly):
+    service, mcp, _ = weekly
+    todo(service, "已取消的期中考试", "cancelled", due="2026-11-02T09:00:00+08:00")
+    data = await call(mcp, "weekly_review_input", {})
+    assert data["todos"] == {"status": "没有数据"}
+    assert data["next_week"]["todos"] == data["next_week"]["exams"] == "没有数据"
 
 
 async def test_all_weekly_numbers_and_only_aggregate_data(weekly, monkeypatch):
@@ -199,11 +210,13 @@ async def test_all_weekly_numbers_and_only_aggregate_data(weekly, monkeypatch):
     assert data["activities"]["attended_or_registered"] == "没有数据"
     assert data["health"]["average_sleep_minutes"] == 450
     assert data["health"]["sleep_days"] == 2 and data["health"]["readiness_change"] == 1.5
-    assert (data["tokens"]["total"], data["tokens"]["assistant"], data["tokens"]["own"]) == (
-        270,
-        240,
-        30,
-    )
+    assert "tokens" not in data
+    assert data["extraction"] == extraction_stats(service.store, 1, now=NOW)["weeks"][0]
+    # Token accounting remains available on its own plugin, outside the weekly review.
+    from plugins.token_usage.usage import Ledger
+
+    ledger = Ledger(service.db, ZONE, MONDAY + timedelta(days=6), tokens.config)
+    assert ledger.total(MONDAY, MONDAY + timedelta(days=6)) == 270
     assert [t["title"] for t in data["next_week"]["todos"]] == ["体测考试", "下周作业"]
     assert [t["title"] for t in data["next_week"]["homework"]] == ["下周作业"]
     assert [t["title"] for t in data["next_week"]["exams"]] == ["体测考试"]
@@ -223,8 +236,7 @@ async def test_empty_enabled_plugins_and_timetable_estimates(weekly, monkeypatch
     classes = await timetable(service, monkeypatch)
     data = await plugin.review_input({})
     assert all(
-        data[k]["status"] == "没有数据"
-        for k in ("homework", "activities", "health", "tokens", "timetable")
+        data[k]["status"] == "没有数据" for k in ("homework", "activities", "health", "timetable")
     )
     prior = MONDAY - timedelta(days=7)
     classes.store_week(
@@ -351,6 +363,37 @@ async def test_file_write_failure_does_not_publish_a_card(weekly, monkeypatch):
     assert plugin.context.get("reviews", {}) == {}
 
 
+async def test_cancelled_review_write_finishes_before_teardown(weekly, monkeypatch):
+    service, _, plugin = weekly
+    entered, released = threading.Event(), threading.Event()
+    save = service.memory.save
+
+    def blocked_save(*args):
+        entered.set()
+        assert released.wait(5)
+        return save(*args)
+
+    monkeypatch.setattr(service.memory, "save", blocked_save)
+    task = asyncio.create_task(plugin.review_write({"date": "2026-11-01", "text": "本周回顾。"}))
+    stopping = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        stopping = asyncio.create_task(plugin.teardown())
+        await asyncio.sleep(0)
+        assert not stopping.done()
+    finally:
+        released.set()
+        await asyncio.gather(*([task, stopping] if stopping else [task]), return_exceptions=True)
+    assert task.cancelled()
+    revision = plugin.context.get("reviews")["2026-W44"]["revision"]
+    with pytest.raises(RuntimeError, match="weekly_review_stopped"):
+        await plugin.review_write({"date": "2026-11-01", "text": "停用后不再写。"})
+    assert plugin.context.get("reviews")["2026-W44"]["revision"] == revision
+
+
 class Agent:
     def __init__(self, effect=None, result=None):
         self.effect, self.result, self.prompts = effect, result or RunResult(True), []
@@ -409,7 +452,12 @@ async def test_chosen_agent_schedule_and_bad_arguments(weekly):
     plugin.now = lambda: NOW
     calls = []
 
-    async def run_agent(job, prompt, succeeded, incomplete_error, harness):
+    async def run_agent(job, prompt, succeeded, incomplete_error, harness, grant):
+        assert grant.tools == set() and grant.memory_read_paths == set()
+        assert grant.plugin_tools == {
+            ("weekly_review", "weekly_review_input"),
+            ("weekly_review", "weekly_review_write"),
+        }
         calls.append((job, harness))
         assert not succeeded()
         await plugin.review_write({"date": "2026-11-01", "text": "回顾写好了。"})

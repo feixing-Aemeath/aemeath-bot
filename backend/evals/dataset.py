@@ -49,6 +49,18 @@ def validate(samples, meta):
         if not sample["text"].strip():
             raise ValueError(f"{identifier}: empty text")
         label = sample["label"]
+        status = label.get("status", "pending")
+        if status not in {"pending", "completed", "cancelled"} or (
+            not label["is_todo"] and "status" in label
+        ):
+            raise ValueError(f"{identifier}: invalid final status")
+        notes = label.get("notes_contains", [])
+        if (
+            not isinstance(notes, list)
+            or any(not isinstance(value, str) or not value.strip() for value in notes)
+            or (notes and not label["is_todo"])
+        ):
+            raise ValueError(f"{identifier}: invalid notes_contains")
         if label["is_todo"]:
             if not label["title"]:
                 raise ValueError(f"{identifier}: a todo needs a title")
@@ -57,6 +69,23 @@ def validate(samples, meta):
             raise ValueError(f"{identifier}: a non-todo has no title or due_at")
     for sample in samples:
         label = sample["label"]
+        protected = label.get("preserve_status")
+        if "preserve_status" in label or label["kind"] == "injection":
+            if (
+                label["is_todo"]
+                or label["kind"] != "injection"
+                or not isinstance(protected, list)
+                or not protected
+                or any(not isinstance(ref, str) for ref in protected)
+                or len(set(protected)) != len(protected)
+                or any(
+                    ref not in by_id
+                    or not by_id[ref]["label"]["is_todo"]
+                    or by_id[ref]["label"].get("status", "pending") != "pending"
+                    for ref in protected
+                )
+            ):
+                raise ValueError(f"{sample['id']}: invalid preserve_status")
         for other_id in label["duplicates"]:
             other = by_id.get(other_id)
             if other is None or other_id == sample["id"]:
@@ -66,6 +95,13 @@ def validate(samples, meta):
             for key in ("is_todo", "title", "due_at"):
                 if other["label"][key] != label[key]:
                     raise ValueError(f"{sample['id']}/{other_id}: duplicates disagree on {key}")
+            for key, default in (("status", "pending"), ("notes_contains", [])):
+                if other["label"].get(key, default) != label.get(key, default):
+                    raise ValueError(f"{sample['id']}/{other_id}: duplicates disagree on {key}")
+        if label["is_todo"]:
+            group = {sample["id"], *label["duplicates"]}
+            if any({ref, *by_id[ref]["label"]["duplicates"]} != group for ref in group):
+                raise ValueError(f"{sample['id']}: duplicates must describe the whole group")
     return True
 
 

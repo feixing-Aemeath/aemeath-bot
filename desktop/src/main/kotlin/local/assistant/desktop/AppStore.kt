@@ -71,8 +71,8 @@ class AppStore(
         messages(bot), Instant.ofEpochMilli(device.seen(bot.id)), firstLaunchInstant(device),
     ) > 0
 
-    fun markSeen(id: String) {
-        device.markSeen(id)
+    fun markSeen(id: String, visible: Boolean = true) {
+        if (visible) device.markSeen(id)
     }
 
     fun choose(id: String) {
@@ -169,7 +169,7 @@ class AppStore(
             val loaded = coroutineScope {
                 val status = async { api.status() }
                 val today = async { api.today() }
-                val todos = async { api.todos().items }
+                val todos = async { api.allTodos() }
                 val runs = async { api.runs().items }
                 val plugins = async { api.plugins() }
                 val digests = async { optional(before.digests) { api.digests().items } }
@@ -236,9 +236,7 @@ class AppStore(
             val page = api.chat(id, if (earlier) existing.size else 0)
             if (epoch != generation) return
             mutable.update { current ->
-                val rows = (current.chats[id].orEmpty() + page.items).groupBy { it.id }.values.map { versions ->
-                    versions.maxWith(compareBy<ChatMessage> { instant(it.updatedAt) }.thenBy { if (it.status == "pending") 0 else 1 })
-                }.sortedBy { instant(it.createdAt) }
+                val rows = BotTimeline.mergeChat(current.chats[id].orEmpty(), page.items)
                 current.copy(chats = current.chats + (id to rows))
             }
         } catch (error: CancellationException) {
@@ -273,7 +271,7 @@ class AppStore(
         perform("没能保存待办") {
             val updated = backend.updateTodo(todo.id, patch)
             fun List<Todo>.replaced(): List<Todo> = map { if (it.id == updated.id) updated else it }
-                .filter { it.status != "deleted" }
+                .filter { it.visible }
             mutable.update { current ->
                 current.copy(
                     todos = current.todos.replaced(), today = current.today?.let { it.copy(todos = it.todos.replaced()) },

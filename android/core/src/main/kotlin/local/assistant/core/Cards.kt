@@ -25,15 +25,38 @@ data class ListItem(
     val detail: String? = null,
     val progress: Progress? = null,
     val state: String? = null
-)
+) {
+    val timeRange: Pair<String, String>?
+        get() {
+            val parts = subtitle?.split(Regex("[–~-]"))?.map(String::trim) ?: return null
+            return parts.takeIf { it.size == 2 && it.all { time -> time.length == 5 && ':' in time } }
+                ?.let { it[0] to it[1] }
+        }
+}
 
-data class Point(val x: String, val y: Double, val label: String? = null)
+data class Point(val x: String, val y: Double, val label: String? = null) {
+    val display get() = label ?: CardParser.display(JsonPrimitive(y)).orEmpty()
+
+    fun share(total: Double): String {
+        val percent = if (total > 0) y / total * 100 else 0.0
+        return if (percent > 0 && percent < 1) "<1%" else "${percent.toInt()}%"
+    }
+}
+
+data class BarParts(val regular: Double, val excess: Double)
 
 data class Series(val name: String, val points: List<Point>)
 
 data class Target(val value: Double, val label: String?)
 
-data class StatBar(val max: Double, val segments: List<Point>, val tone: String?)
+data class StatBar(val max: Double, val segments: List<Point>, val tone: String?) {
+    val fractions: List<Double>
+        get() {
+            val parts = segments.map { it.y.coerceAtLeast(0.0) }
+            val total = maxOf(max, parts.sum(), Double.MIN_VALUE)
+            return parts.map { it / total }
+        }
+}
 
 data class CardTable(val columns: List<String>, val rows: List<List<String>>, val highlight: Int?)
 
@@ -59,7 +82,14 @@ sealed interface CardContent {
         val value: String?,
         val label: String?,
         val target: Target?
-    ) : CardContent
+    ) : CardContent {
+        fun barParts(value: Double): BarParts {
+            val limit = target?.value
+            return if (kind == "bar" && series.size == 1 && limit != null && value > limit) {
+                BarParts(limit, value - limit)
+            } else BarParts(value, 0.0)
+        }
+    }
 
     data class Photos(val photos: List<Photo>) : CardContent
 

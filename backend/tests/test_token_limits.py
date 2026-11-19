@@ -125,6 +125,25 @@ def keychain(token="sk-ant-oat01-secret", expires=NOW + 3600, plan="max"):
     return lambda: json.dumps({"claudeAiOauth": login})
 
 
+def test_session_fallback_uses_snapshot_time_instead_of_file_mtime(tmp_path):
+    older = rollout(tmp_path, "rollout-a.jsonl", "2026-10-23T01:00:00Z", 50)
+    newer = rollout(tmp_path, "rollout-b.jsonl", "2026-10-23T03:00:00Z", 33)
+    # Copying an old file today does not make its quota snapshot current.
+    os.utime(older, (NOW, NOW))
+    os.utime(newer, (NOW - 60, NOW - 60))
+    found = limits.codex_from_sessions([str(tmp_path)])
+    assert found[1]["primary"]["used_percent"] == 33
+
+
+def test_codex_spawn_failure_still_allows_session_fallback(tmp_path):
+    rollout(tmp_path, "rollout-a.jsonl", "2026-10-23T03:00:00Z", 33)
+    entry = read_codex(
+        [str(tmp_path)], live=lambda: codex_live(executable=str(tmp_path / "missing-codex"))
+    )
+    assert entry["source"] == "session" and entry["windows"][0]["used_percent"] == 33
+    assert entry["error"] == "codex_app_server_failed"
+
+
 USAGE = {
     "five_hour": {"utilization": 33.0, "resets_at": "2026-10-24T09:00:00.123456+00:00"},
     "seven_day": {"utilization": 6, "resets_at": "2026-10-29T00:00:00+00:00"},

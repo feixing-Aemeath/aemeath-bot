@@ -1,18 +1,43 @@
 """每日文件夹 (core/daily.py): one day's files from the database and the plugins' daily hooks."""
 
 import json
-from datetime import UTC, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from core.daily import keep_notes
 from core.mcp_server import create_mcp
-from core.models import TodoPatch
+from core.models import MessageInput, RuntimeSettings, TodoPatch
 from tests.test_health_reports import MORNING, enable_health
 from tests.test_school import NOW, add_todo, call, enable, ingest
 
 DAY = NOW.date()  # Wednesday 21 October 2026
 FOLDER = f"每日/{DAY.isoformat()}"
+
+
+@pytest.mark.parametrize("day", [date(2026, 3, 8), date(2026, 11, 1)])
+def test_messages_use_local_midnights_on_dst_days(service, day):
+    zone = ZoneInfo("America/New_York")
+    service.db.put("settings", RuntimeSettings(timezone=zone.key).model_dump())
+    moments = [
+        datetime.combine(day, datetime.min.time(), zone) - timedelta(microseconds=1),
+        datetime.combine(day, datetime.min.time(), zone),
+        datetime.combine(day + timedelta(days=1), datetime.min.time(), zone)
+        - timedelta(microseconds=1),
+        datetime.combine(day + timedelta(days=1), datetime.min.time(), zone),
+    ]
+    service.store.ingest(
+        "fixture",
+        [
+            MessageInput(
+                external_id=str(i), chat_name="test", sender="test", sent_at=at, text=str(i)
+            )
+            for i, at in enumerate(moments)
+        ],
+        ["test"],
+    )
+    assert [row["text"] for row in service.daily.messages(day)] == ["1", "2"]
 
 
 @pytest.fixture
@@ -118,6 +143,18 @@ async def test_notes_survive_rewriting(started):
     )
 
 
+async def test_cancelled_tasks_are_absent_from_daily_files(started):
+    service, _ = started
+    await enable(service, "homework", {"course_chats": ["系统实践课程群"]})
+    message = ingest(service, "系统实践课程群", "今天18:00交实验报告", "cancelled")
+    task = add_todo(service, message, "交实验报告", "交实验报告", NOW.replace(hour=18), True)
+    service.store.update_todo(task["id"], TodoPatch(status="cancelled", notes="老师取消了作业"))
+    stamp_on(service, "todos", task["id"], "updated_at", NOW)
+    await service.daily.write(DAY)
+    assert "交实验报告" not in read(service, "待办.md")
+    assert "交实验报告" not in read(service, "作业.md")
+
+
 @pytest.mark.parametrize("identities", [[], ["张三", "2026123456"]])
 async def test_messages_redact_local_identities_before_indexing(started, identities):
     service, _ = started
@@ -143,6 +180,35 @@ async def test_messages_redact_local_identities_before_indexing(started, identit
         service.db.rows("SELECT text FROM messages WHERE external_id='private'")[0]["text"]
         == original
     )
+
+
+async def test_todo_identities_are_redacted_in_daily_and_plugin_tools(started):
+    service, mcp = started
+    await enable(service, "homework")
+    await enable(service, "weekly_review")
+    service.db.execute(
+        "UPDATE plugins SET config_json=? WHERE id='qq_screen'",
+        (json.dumps({"self_names": ["张三", "2026123456"]}),),
+    )
+    raw = "张 三（２０２６１２３４５６）请交作业"
+    message = ingest(service, "张三的班级", raw, "private-todo")
+    todo = add_todo(service, message, raw, raw, NOW.replace(hour=18), True)
+    stamp_on(service, "todos", todo["id"], "created_at", NOW)
+    service.store.update_todo(todo["id"], TodoPatch(notes="张三的材料"))
+    await call(mcp, "homework_mark", {"todo_id": todo["id"], "course": "张三的课"})
+
+    await service.daily.write(DAY)
+    outputs = [read(service, name) for name in ("待办.md", "作业.md")]
+    outputs.append(json.dumps(await call(mcp, "homework_list", {}), ensure_ascii=False))
+    outputs.append(
+        json.dumps(await call(mcp, "weekly_review_input", {"date": str(DAY)}), ensure_ascii=False)
+    )
+    for output in outputs:
+        assert "[本人]" in output
+        assert all(identity not in output for identity in ("张三", "张 三", "２０２６１２３４５６"))
+    assert service.store.todo(todo["id"])["title"] == raw
+    assert service.store.todo(todo["id"])["sources"][0]["chat_name"] == "张三的班级"
+    assert not service.memory.search("２０２６１２３４５６")
 
 
 async def test_school_plugins_add_their_own_files(started):
@@ -218,3 +284,32 @@ async def test_daily_job_is_scheduled(started):
     service.jobs.configure()
     assert service.jobs.scheduler.get_job("daily_notes") is not None
     assert "daily_notes" in service.jobs.callbacks
+
+
+def test_generated_notes_heading_does_not_break_daily_idempotence():
+    generated = "# 课程资料\n\n## 笔记\n\n老师要求整理笔记。"
+    first = keep_notes(None, generated)
+    assert keep_notes(first, generated) == first
+    assert first.count("\n## 笔记\n") == 1 and "### 笔记" in first
+    # The user's own notes may hold the heading too, and none of them is lost.
+    annotated = first + "\n用户分析。\n\n## 笔记\n\n引用的同名标题。\n"
+    rewritten = keep_notes(annotated, generated + "\n新增资料。")
+    assert rewritten.endswith("用户分析。\n\n## 笔记\n\n引用的同名标题。\n")
+    assert "新增资料。" in rewritten
+
+
+@pytest.mark.parametrize(
+    "day,start,end",
+    [
+        (date(2026, 3, 8), "2026-03-08T05:00:00+00:00", "2026-03-09T04:00:00+00:00"),
+        (date(2026, 11, 1), "2026-11-01T04:00:00+00:00", "2026-11-02T05:00:00+00:00"),
+    ],
+)
+def test_daily_bounds_follow_local_midnight_on_dst_days(service, day, start, end):
+    service.db.put("settings", {"timezone": "America/New_York"})
+    assert service.daily.bounds(day) == (start, end)
+    # The last half hour belongs to this day, while the next midnight does not.
+    inside = datetime.fromisoformat(end) - timedelta(minutes=30)
+    ingest(service, "班级", "最后半小时", "inside", sent_at=inside)
+    ingest(service, "班级", "次日零点", "outside", sent_at=datetime.fromisoformat(end))
+    assert [row["text"] for row in service.daily.messages(day)] == ["最后半小时"]

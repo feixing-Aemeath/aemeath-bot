@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 
 from core.db import Database
@@ -17,6 +18,8 @@ class Memory:
         self.access = KnowledgeAccess(db, self.root)
         self.documents = documents or Documents(db.path.parent / "knowledge_text")
         self.knowledge = None
+        self._index_lock = threading.Lock()
+        self._index_version, self._indexed_at = 0, {}
 
     def path(self, relative: str) -> Path:
         target = safe_path(self.root, relative)
@@ -64,33 +67,39 @@ class Memory:
         temp = path.with_suffix(".md.tmp")
         if is_link(temp):
             raise ValueError("invalid temporary path")
-        # newline="": write the text as given. Windows would turn "\n" into "\r\n", and a
-        # user's own "\r\n" into "\r\r\n", which changes notes and their hashes.
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="",
-            dir=path.parent,
-            prefix=".memory-",
-            suffix=".tmp",
-            delete=False,
-        ) as output:
-            temp = Path(output.name)
-            output.write(content)
+        temp = None
         try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                # Preserve both LF and CRLF on Windows, including the note's hash.
+                newline="",
+                dir=path.parent,
+                prefix=".memory-",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temp = Path(output.name)
+                output.write(content)
             os.replace(temp, path)
         finally:
-            temp.unlink(missing_ok=True)
+            if temp is not None:
+                temp.unlink(missing_ok=True)
         self.index_one(path)
 
     def index_one(self, path):
         relative = path.relative_to(self.root).as_posix()
         safe_path(self.root, relative)
         result = self.documents.read(path)
-        with self.db.connect() as conn:
-            conn.execute("DELETE FROM memory_fts WHERE path=?", (relative,))
-            if not result["error"]:
-                conn.execute("INSERT INTO memory_fts VALUES(?,?)", (relative, result["content"]))
+        with self._index_lock:
+            with self.db.connect() as conn:
+                conn.execute("DELETE FROM memory_fts WHERE path=?", (relative,))
+                if not result["error"]:
+                    conn.execute(
+                        "INSERT INTO memory_fts VALUES(?,?)", (relative, result["content"])
+                    )
+            self._index_version += 1
+            self._indexed_at[relative] = self._index_version
 
     def files(self):
         # os.walk without following links; reject linked ancestors as well as leaf links.
@@ -105,6 +114,8 @@ class Memory:
                     yield path
 
     def reindex(self):
+        with self._index_lock:
+            version = self._index_version
         self.access.discover()
         records = []
         for path in self.files():
@@ -116,7 +127,15 @@ class Memory:
                     records.append((path.relative_to(self.root).as_posix(), result["content"]))
             except (OSError, UnicodeError, ValueError):
                 continue
-        with self.db.connect() as conn:
+        with self._index_lock, self.db.connect() as conn:
+            # Preserve writes indexed while this filesystem snapshot was being collected.
+            changed = {p for p, revision in self._indexed_at.items() if revision > version}
+            records = [record for record in records if record[0] not in changed]
+            records.extend(
+                (row["path"], row["content"])
+                for row in conn.execute("SELECT path,content FROM memory_fts")
+                if row["path"] in changed
+            )
             conn.execute("DELETE FROM memory_fts")
             conn.executemany("INSERT INTO memory_fts VALUES(?,?)", records)
         if self.knowledge:
@@ -130,23 +149,31 @@ class Memory:
         scope, args = self.access.sql_filter()
         if len(query) < 3:
             escaped = re.sub(r"([%_\\])", r"\\\1", query)
-            rows = self.db.rows(
+            sql = (
                 "SELECT path,substr(content,1,400) AS excerpt FROM memory_fts "
-                f"WHERE content LIKE ? ESCAPE '\\' AND {scope} LIMIT ?",
-                (f"%{escaped}%", *args, limit),
+                f"WHERE content LIKE ? ESCAPE '\\' AND {scope} ORDER BY rowid LIMIT ? OFFSET ?"
             )
+            parameters = (f"%{escaped}%", *args)
         else:
             phrase = '"' + query.replace('"', '""') + '"'
-            rows = self.db.rows(
+            sql = (
                 "SELECT path,snippet(memory_fts,1,'','', '…',40) AS excerpt "
-                f"FROM memory_fts WHERE memory_fts MATCH ? AND {scope} ORDER BY rank LIMIT ?",
-                (phrase, *args, limit),
+                f"FROM memory_fts WHERE memory_fts MATCH ? AND {scope} "
+                "ORDER BY rank,rowid LIMIT ? OFFSET ?"
             )
-        results = []
-        for row in rows:
-            try:
-                if self.path(row["path"]).is_file():
-                    results.append(row)
-            except ValueError:
-                continue
+            parameters = (phrase, *args)
+        results, offset = [], 0
+        while len(results) < limit:
+            rows = self.db.rows(sql, (*parameters, limit, offset))
+            for row in rows:
+                try:
+                    if self.path(row["path"]).is_file():
+                        results.append(row)
+                        if len(results) == limit:
+                            break
+                except ValueError:
+                    continue
+            if len(rows) < limit:
+                break
+            offset += len(rows)
         return results

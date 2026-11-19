@@ -81,6 +81,8 @@ class HealthEngine:
             _, touched = self.observations.add(normalized, "upload")
             used += len(normalized)
             days |= touched
+            pending = set(self.kv("pending_utc_days", [])) | touched
+            self.put_kv("pending_utc_days", sorted(pending))
             cursor = rows[-1]["position"]
             self.put_kv("upload_cursor", cursor)  # only after the batch is stored
         return {"used": used, "ignored": ignored, "days": days}
@@ -112,7 +114,11 @@ class HealthEngine:
             return datetime.fromtimestamp(moment, self.zone).date()
 
         first = min(day_of(kind, low) for kind, (low, _) in bounds.items())
-        last = max(day_of(kind, max(low, high - 1)) for kind, (low, high) in bounds.items())
+        # Sleep belongs to the date of its wake, including a wake exactly at the cutoff.
+        last = max(
+            day_of(kind, high if kind == "sleep" else max(low, high - 1))
+            for kind, (low, high) in bounds.items()
+        )
         return first, last
 
     def affected_dates(self, utc_days):
@@ -176,7 +182,9 @@ class HealthEngine:
             if full or (self.stale and not incremental_only):
                 days = self.recompute()
             else:
-                days = self.recompute(self.affected_dates(ingest["days"]))
+                pending = set(self.kv("pending_utc_days", [])) | ingest["days"]
+                days = self.recompute(self.affected_dates(pending))
+            self.put_kv("pending_utc_days", [])
             return {
                 "uploads_used": ingest["used"],
                 "uploads_ignored": ingest["ignored"],

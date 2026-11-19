@@ -22,7 +22,7 @@ import local.assistant.desktop.*
 data class Route(val page: String, val argument: String = "")
 
 @Composable
-fun DesktopApp(store: AppStore, state: DesktopState) {
+fun DesktopApp(store: AppStore, state: DesktopState, visible: Boolean = true) {
     val initial = remember {
         if (store.device.chosen == "settings") Route("settings") else Route("bot", store.device.chosen)
     }
@@ -94,7 +94,7 @@ fun DesktopApp(store: AppStore, state: DesktopState) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                             } else key(selected.id) {
                                 CompositionLocalProvider(LocalBotTint provides accent(selected.look.accent)) {
-                                    BotPage(selected, store, state, ::navigate)
+                                    BotPage(selected, store, state, ::navigate, visible = visible)
                                 }
                             }
                         }
@@ -173,7 +173,7 @@ private fun Sidebar(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusDot(if (state.online) Color(0xFF72967A) else LocalPalette.current.muted)
-                Muted(if (store.device.mock) "模拟数据" else if (state.online) "Mac 在线" else "连不上 Mac")
+                Muted(if (store.device.mock) "模拟数据" else if (state.online) "后端在线" else "连不上后端")
             }
             Row(
                 Modifier.fillMaxWidth().background(if (selected == "settings") LocalPalette.current.selection else Color.Transparent, RoundedCornerShape(8.dp))

@@ -216,6 +216,51 @@ def stages_card(nights):
     return card("chart", f"最近 {len(nights)} 晚睡眠分期", kind="bar", unit="小时", series=series)
 
 
+# The metrics a chat reply can draw over days (the plugin's `trend` chart): name and unit.
+TREND_METRICS = {
+    "sleep": ("总睡眠", "小时"),
+    "resting_hr": ("静息心率", "次/分"),
+    "hrv": ("HRV", "毫秒"),
+    "steps": ("步数", "步"),
+    "active_energy": ("活动能量", "千卡"),
+    "respiratory_rate": ("睡眠呼吸频率", "次/分"),
+}
+FITTED_TRENDS = {"sleep", "resting_hr", "hrv", "respiratory_rate"}
+
+
+def trend_value(day, metric):
+    """A day's value of a trend metric, None unless it was measured well enough."""
+    if metric == "hrv":
+        measure = day.get("hrv_preferred")
+        view = day["metrics"].get(measure) if measure else None
+        if view and view["quality"] == "ok" and view.get(HRV_MS[measure]) is not None:
+            return round(view[HRV_MS[measure]])
+        return None
+    view = day["metrics"].get("sleep_minutes" if metric == "sleep" else metric)
+    if not view or view["quality"] != "ok" or view["value"] is None:
+        return None
+    return round(view["value"] / 60, 2) if metric == "sleep" else view["value"]
+
+
+def trend_card(days, metric):
+    """A line of one metric over the days, skipping days without a good value; None when fewer
+    than two days have one."""
+    name, unit = TREND_METRICS[metric]
+    points = []
+    for day in days:
+        value = trend_value(day, metric)
+        if value is not None:
+            moment = date.fromisoformat(day["date"])
+            points.append({"x": f"{moment.month}/{moment.day}", "y": value})
+    if len(points) < 2:
+        return None
+    gap = " " if name.isascii() else ""  # 「最近 30 天 HRV」, 「最近 30 天步数」
+    # A resting heart rate of 55–62 would be a flat line on an axis from zero.
+    fit = {"zero": False} if metric in FITTED_TRENDS else {}
+    title = f"最近 {len(days)} 天{gap}{name}"
+    return card("chart", title, kind="line", unit=unit, points=points, **fit)
+
+
 def regularity_card(regularity):
     week, month = regularity["sri_7d"], regularity["sri_30d"]
     spreads = []

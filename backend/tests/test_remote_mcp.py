@@ -58,7 +58,7 @@ def test_configured_tailscale_name_works_with_the_token(tmp_path):
     listed = post(
         service, REMOTE, body={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     )
-    assert len(listed.json()["result"]["tools"]) == 12
+    assert len(listed.json()["result"]["tools"]) == 14
     assert post(service, "evil.example").status_code == 421
 
 

@@ -1,5 +1,6 @@
 """Two knowledge inputs with synthetic files, fake PhotoKit/OCR and fake timetables."""
 
+import hashlib
 import os
 from datetime import datetime, timedelta
 
@@ -430,7 +431,10 @@ async def test_delayed_icloud_photo_is_found_without_reexport(photos, tmp_path):
 
 async def test_photo_existing_file_is_not_overwritten(photos, service, tmp_path):
     identifier = add_photo(photos, tmp_path, "existing", "08:00:00")
-    target = service.memory.root / "知识库/高数/课堂照片/2026-10-29/0800-existing.heic"
+    fingerprint = hashlib.sha256(identifier.encode()).hexdigest()[:16]
+    target = (
+        service.memory.root / f"知识库/高数/课堂照片/2026-10-29/0800-existing-{fingerprint}.heic"
+    )
     target.parent.mkdir(parents=True)
     target.write_bytes(b"user file")
     await photos.scan()
@@ -567,3 +571,71 @@ async def test_goodnotes_does_not_copy_an_unchanged_backup_again(service, goodno
     assert len(copies) == 1
     copied = service.memory.root / "知识库/数据结构/GoodNotes/第5章.pdf"
     assert copied.read_bytes() == b"pdf v2"
+
+
+async def test_goodnotes_invalid_existing_target_does_not_block_other_notebooks(
+    service, goodnotes, tmp_path
+):
+    service.knowledge.topic("课程")
+    backup(goodnotes, "课程/a.pdf")
+    await goodnotes.scan()
+    target = service.memory.root / "知识库/课程/GoodNotes/a.pdf"
+    target.unlink()
+    private = tmp_path / "private.pdf"
+    private.write_bytes(b"private")
+    target.symlink_to(private)
+    backup(goodnotes, "课程/b.pdf", b"second notebook")
+    await goodnotes.scan()
+    rows = {n["path"]: n for n in goodnotes.status()["notebooks"]}
+    assert rows["课程/a.pdf"]["status"] == "conflict"
+    assert rows["课程/b.pdf"]["status"] == "copied"
+    assert private.read_bytes() == b"private"
+
+
+async def test_photos_same_id_prefix_and_minute_keep_both_images(photos, tmp_path):
+    first = add_photo(photos, tmp_path, "abcdef12-one", "08:10:00")
+    second = add_photo(photos, tmp_path, "abcdef12-two", "08:10:30")
+    await photos.scan()
+    rows = photos.db.rows("SELECT * FROM class_photos_files ORDER BY id")
+    assert {r["id"] for r in rows} == {first, second}
+    assert [r["status"] for r in rows] == ["copied", "copied"]
+    assert len({r["output_path"] for r in rows}) == 2
+    for row in rows:
+        assert (photos.context.memory.root / row["output_path"]).read_bytes() == (
+            photos.photos.files[row["id"]].read_bytes()
+        )
+
+
+@pytest.mark.parametrize("published", [False, True])
+async def test_photo_interrupted_publication_recovers_without_overwriting(
+    photos, tmp_path, monkeypatch, published
+):
+    class ProcessStopped(BaseException):
+        pass
+
+    identifier = add_photo(photos, tmp_path, "crashed", "08:00:00")
+    original = os.link
+
+    def stop(source, target):
+        if published:
+            original(source, target)
+        raise ProcessStopped()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("plugins.class_photos.plugin.os.link", stop)
+        with pytest.raises(ProcessStopped):
+            await photos.scan()
+    [row] = photos.db.rows("SELECT * FROM class_photos_files")
+    assert row["status"] == "importing"
+    target = photos.context.memory.root / row["output_path"]
+    if published:
+        target.write_bytes(b"user edit after crash")
+    await photos.scan()
+    [row] = photos.db.rows("SELECT * FROM class_photos_files")
+    if published:
+        assert row["status"] == "conflict"
+        assert target.read_bytes() == b"user edit after crash"
+        assert photos.photos.exports == [identifier]
+    else:
+        assert row["status"] == "copied"
+        assert target.read_bytes() == photos.photos.files[identifier].read_bytes()

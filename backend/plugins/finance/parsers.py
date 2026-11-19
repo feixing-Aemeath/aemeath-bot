@@ -26,6 +26,7 @@ class Statement:
     coverage: str = "transactions"
     # What each account held at `end` (a bank statement's last balance), in cents.
     balances: dict = field(default_factory=dict)
+    balance_dates: dict = field(default_factory=dict)
 
 
 def clean(value):
@@ -209,7 +210,12 @@ def tables(rows, zone):
             continue
         row = {k: clean(values[i]) if i < len(values) else "" for i, k in enumerate(keys) if k}
         at = timestamp(row["time"], zone)
-        if "交易关闭" in row["status"]:
+        if "交易关闭" in row["status"] or row["status"] in {
+            "支付失败",
+            "交易失败",
+            "已取消",
+            "等待买家付款",
+        }:
             continue
         if not row["id"] or row["id"] in {"/", "-"}:
             raise FinanceError("账单缺少交易单号")

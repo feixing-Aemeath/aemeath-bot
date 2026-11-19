@@ -7,6 +7,20 @@ import org.junit.Test
 
 class MockBackendTest {
     @Test
+    fun cancelledTodosAreHiddenAndAppleIdentifiersAreCleared() = runTest {
+        val api = MockBackend({ testNow }, testZone)
+        val todo = api.todos().items.first()
+        assertNotNull(todo.reminderId)
+        api.updateTodo(todo.id, patch("calendar_event_id" to JsonPrimitive("synthetic-calendar-id")))
+        val cancelled = api.updateTodo(todo.id, patch("status" to JsonPrimitive("cancelled")))
+        assertNull(cancelled.reminderId)
+        assertNull(cancelled.calendarEventId)
+        assertFalse(api.todos().items.any { it.id == todo.id })
+        assertFalse(api.today().todos.any { it.id == todo.id })
+        assertEquals(todo.id, api.todos(status = "cancelled").items.single().id)
+    }
+
+    @Test
     fun todayHasOpenDueTodosAndSources() = runTest {
         val api = MockBackend({ testNow }, testZone)
         val today = api.today()

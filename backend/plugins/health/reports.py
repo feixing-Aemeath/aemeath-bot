@@ -400,7 +400,17 @@ class Reports:
     def input(self, kind, day, today):
         row = self.row(kind, day)
         if row and row["input_json"] not in (None, "{}"):
-            return json.loads(row["input_json"])
+            bundle = json.loads(row["input_json"])
+            if bundle.get("goals") and self.memory is not None:
+                # Cached vault text keeps the source file's current reader policy.
+                try:
+                    path = self.memory.path(bundle["goals"]["path"])
+                    self.memory.access.require_read(path.relative_to(self.memory.root).as_posix())
+                    if not path.is_file():
+                        bundle["goals"] = None
+                except (OSError, ValueError):
+                    bundle["goals"] = None
+            return bundle
         return self.prepare(kind, day, today)  # an Agent asked outside a scheduled job
 
     def submit(self, kind, day, title, body, today):
@@ -418,16 +428,16 @@ class Reports:
             )
             left = self.config.max_rejections - row["rejections"] - 1
             return {"accepted": False, "errors": errors, "attempts_left": max(left, 0)}
-        self.db.execute(
-            "UPDATE health_reports SET status='ready',title=?,body=?,error=NULL,updated_at=? "
-            "WHERE id=?",
-            (title, body, timestamp, row["id"]),
-        )
         if self.memory is not None:
             # Only this report's generated path uses the trusted writer.
             path = self.memory.path(f"{MEMORY_FOLDERS[kind]}/{day.isoformat()}.md")
             path.parent.mkdir(parents=True, exist_ok=True)
             self.memory.save(path, f"# {title}\n\n{body}\n")
+        self.db.execute(
+            "UPDATE health_reports SET status='ready',title=?,body=?,error=NULL,updated_at=? "
+            "WHERE id=?",
+            (title, body, timestamp, row["id"]),
+        )
         return {
             "accepted": True,
             "report": {"id": row["id"], "kind": kind, "date": day.isoformat()},

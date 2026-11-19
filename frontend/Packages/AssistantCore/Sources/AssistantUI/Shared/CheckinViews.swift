@@ -11,6 +11,8 @@
         @State private var perceived = 0  // 0: not given
         @State private var sending = false
         @State private var saved: String?
+        /// In a card of its own; in a sheet the bar names it.
+        var showsTitle = true
 
         var checkin: ReadinessCheckin {
             ReadinessCheckin(
@@ -24,8 +26,10 @@
 
         var body: some View {
             VStack(alignment: .leading, spacing: 10) {
-                CardTitle("今天的记录", icon: "square.and.pencil")
-                Text("用来校准综合准备度：记满 3 周后，在 Mac 上运行 scripts.readiness_calibration，对比这两项和算出的分数，给出调整权重的建议。")
+                if showsTitle {
+                    CardTitle("今天的记录", icon: "square.and.pencil")
+                }
+                Text("记满 3 周后，用来校准综合准备度的权重。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 DatePicker("日期", selection: $day, in: ...Date(), displayedComponents: .date)
@@ -74,12 +78,65 @@
                     }
                 }
             }
-            // One of 健康Bot's cards (BotCards): drawn like them, as tall as its row; the fields
-            // stay within 520 points when the card spans a wide window.
             .frame(maxWidth: 520, alignment: .leading)
-            .padding(12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(CardSurface.padding)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    /// 「今天的记录」 among 健康Bot's cards, slim: what it is for and a button that opens the form
+    /// in a sheet (the form used to be the page's first card, pushing the numbers down).
+    struct CheckinCard: View {
+        @State private var open = false
+
+        var body: some View {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    CardTitle("今天的记录", icon: "square.and.pencil")
+                    Text("记下「健身」App 的准备指数和自己的感觉")
+                        .font(CardFont.note)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button("记录") { open = true }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(CardSurface.padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .cardSurface()
+            .sheet(isPresented: $open) { CheckinSheet() }
+        }
+    }
+
+    /// The check-in form in a sheet.
+    struct CheckinSheet: View {
+        @Environment(\.dismiss) private var dismiss
+
+        var body: some View {
+            #if os(iOS)
+                NavigationStack {
+                    ScrollView { ReadinessCheckinForm(showsTitle: false) }
+                        .background(Palette.page)
+                        .navigationTitle("今天的记录")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            #else
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("今天的记录").font(Typography.serif(17)).padding([.horizontal, .top], 20)
+                    ReadinessCheckinForm(showsTitle: false).padding(.horizontal, 6)
+                    HStack {
+                        Spacer()
+                        Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+                    }
+                    .padding([.horizontal, .bottom], 20)
+                }
+                .frame(width: 420)
+            #endif
         }
     }
 

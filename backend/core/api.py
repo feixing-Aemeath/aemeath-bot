@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import hmac
@@ -8,39 +9,53 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import jsonschema
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
+from pydantic import AwareDatetime, ValidationError
 from starlette.responses import JSONResponse
 
+from core.digests import brief, combine
+from core.extraction_stats import extraction_stats
+from core.health_upload import upload as upload_health
 from core.knowledge_api import router as knowledge_router
 from core.mcp_server import create_mcp
 from core.models import (
+    BotPreferences,
+    BotPreferencesUpdate,
     Card,
     ChatAccepted,
     ChatPage,
     ChatSend,
     DigestPage,
+    ExtractionStats,
     HealthAccepted,
     HealthBatch,
     HealthReportKind,
     HealthReportPage,
     HealthReportStatus,
+    InboxAccepted,
+    InboxItem,
     JobAccepted,
+    OpenChat,
+    OpenChatAccepted,
     PluginPatch,
     PluginView,
     RunPage,
+    RunStatus,
     RuntimeSettings,
     SettingsPatch,
     Status,
     Today,
     Todo,
+    TodoNew,
     TodoPage,
     TodoPatch,
+    TodoSourceTexts,
     TodoStatus,
 )
 from core.service import Service
+from core.source_views import screen_instance, unsure_items
 from core.store import ConflictError, todo_row
 from core.tokens import MAIN, current_grant, required_scopes
 from core.video_api import router as video_router
@@ -48,6 +63,14 @@ from core.webdav import WebDAV
 
 Limit = Annotated[int, Query(ge=1, le=200)]
 Offset = Annotated[int, Query(ge=0)]
+Before = Annotated[
+    str,
+    Query(
+        min_length=1,
+        max_length=2048,
+        description="Exclusive time/date boundary or next_before cursor",
+    ),
+]
 
 
 class BearerAuth:
@@ -207,7 +230,8 @@ def create_app(settings=None, service=None):
     @app.get("/api/v1/today", response_model=Today)
     async def today():
         zone = ZoneInfo(service.store.settings.timezone)
-        day = datetime.now(zone).date()
+        now = datetime.now(zone)
+        day = now.date()
         candidates = service.db.rows(
             "SELECT * FROM todos WHERE status='pending' ORDER BY due_at,id"
         )
@@ -219,34 +243,100 @@ def create_app(settings=None, service=None):
                 and datetime.fromisoformat(row["due_at"]).astimezone(zone).date() <= day
             ]
         )
-        cards = []
-        for plugin in service.plugins.list():
-            cards.extend(await service.plugins.cards(plugin["id"]))
+        # Every plugin's cards at once (each has its own 10 s limit), each marked with its
+        # plugin: the App's dashboard shows them all from this one request.
+        plugins = service.plugins.list()
+        groups = await asyncio.gather(*(service.plugins.cards(p["id"]) for p in plugins))
+        cards = [card for group in groups for card in group]
+        sources = {p["id"] for p in plugins if "source" in p["provides"]} | {"share"}
+        # The assistant's summary: what the message sources said today, without what has gone
+        # by and with only the most pressing todos (digests.brief). Other Bots' digests (usage,
+        # the monthly report) stay on their own pages.
         summaries = service.store.digests(day.isoformat(), limit=200)["items"]
+        said = combine(s["summary"] for s in summaries if s["plugin"] in sources)
         return {
             "date": day,
-            "summary": "\n".join(s["summary"] for s in summaries) or "今天暂无摘要。",
+            "summary": brief(said, now) if said else "",
             "todos": todos,
             "cards": cards,
+            "unsure": unsure_items(service, day, summaries, now),
         }
+
+    @app.post(
+        "/api/v1/todos",
+        response_model=Todo,
+        status_code=201,
+        responses={
+            200: {
+                "model": Todo,
+                "description": "Pending todo with the same current deduplication key",
+            }
+        },
+    )
+    async def new_todo(data: TodoNew, response: Response):
+        result = await service.new_todo(data)
+        response.status_code = 201 if result["disposition"] == "added" else 200
+        return result["todo"]
+
+    @app.post("/api/v1/inbox", response_model=InboxAccepted, status_code=202)
+    async def inbox(data: InboxItem):
+        identifier = service.store.inbox(data)
+        return {
+            "message_id": identifier,
+            "job_started": service.jobs.submit_if_idle("extract_todos"),
+        }
+
+    @app.get("/api/v1/todos/{id}/sources", response_model=TodoSourceTexts)
+    async def todo_sources(id: str):
+        return service.store.todo_source_texts(id)
+
+    @app.get("/api/v1/stats/extraction", response_model=ExtractionStats)
+    async def extraction(weeks: Annotated[int, Query(ge=1, le=26)] = 4):
+        return extraction_stats(service.store, weeks)
 
     @app.get("/api/v1/todos", response_model=TodoPage)
     async def todos(status: TodoStatus | None = None, limit: Limit = 50, offset: Offset = 0):
         return service.store.todos(status, limit, offset)
 
-    @app.patch("/api/v1/todos/{id}", response_model=Todo)
+    @app.patch(
+        "/api/v1/todos/{id}",
+        response_model=Todo,
+        responses={
+            409: {
+                "description": "Terminal deletion, cancelled todo completed without reopening, or duplicate deduplication key"
+            }
+        },
+    )
     async def update_todo(id: str, patch: TodoPatch):
         return await service.update_todo(id, patch)
 
     @app.get("/api/v1/digests", response_model=DigestPage)
     async def digests(
-        date: date | None = None, plugin: str | None = None, limit: Limit = 50, offset: Offset = 0
+        date: date | None = None,
+        plugin: str | None = None,
+        limit: Limit = 50,
+        offset: Offset = 0,
+        before: Before | None = None,
     ):
-        return service.store.digests(date.isoformat() if date else None, plugin, limit, offset)
+        return service.store.digests(
+            date.isoformat() if date else None, plugin, limit, offset, before
+        )
 
     @app.get("/api/v1/runs", response_model=RunPage)
-    async def runs(limit: Limit = 50, offset: Offset = 0):
-        return service.store.runs(limit, offset)
+    async def runs(
+        limit: Limit = 50,
+        offset: Offset = 0,
+        job: str | None = None,
+        status: RunStatus | None = None,
+        since: Annotated[
+            AwareDatetime | None, Query(description="Inclusive started_at boundary")
+        ] = None,
+        until: Annotated[
+            AwareDatetime | None, Query(description="Exclusive started_at boundary")
+        ] = None,
+    ):
+        """Successful extract_todos runs count harness attempts only. Omit status to include scheduler runs."""
+        return service.store.runs(limit, offset, job, status, since, until)
 
     @app.post("/api/v1/jobs/{job_id}/run", response_model=JobAccepted, status_code=202)
     async def run_job(job_id: str):
@@ -270,9 +360,23 @@ def create_app(settings=None, service=None):
     async def plugin_cards(id: str):
         return await service.plugins.cards(id)
 
+    @app.post("/api/v1/plugins/{id}/open-chat", response_model=OpenChatAccepted, status_code=202)
+    async def open_chat(id: str, data: OpenChat):
+        instance = screen_instance(service, id)
+        if data.chat_name not in instance.config.get("whitelist", []):
+            raise HTTPException(403, "screen_open_not_whitelisted")
+        result = instance.request_open(data.chat_name)
+        if result["status"] != "scheduled":
+            reason = result["reason"]
+            raise HTTPException(409 if reason == "screen_open_daily_limit" else 403, reason)
+        return {"accepted": True, "job_started": service.jobs.submit_if_idle(f"fetch:{id}")}
+
+    health_upload_lock = asyncio.Lock()
+
     @app.post("/api/v1/health/samples", response_model=HealthAccepted)
     async def health(batch: HealthBatch):
-        return service.store.health(batch)
+        async with service.plugins.locks.get("health", health_upload_lock):
+            return await asyncio.to_thread(upload_health, service, batch)
 
     @app.get("/api/v1/health/reports", response_model=HealthReportPage)
     async def health_reports(
@@ -281,13 +385,17 @@ def create_app(settings=None, service=None):
         status: HealthReportStatus | None = None,
         limit: Limit = 50,
         offset: Offset = 0,
+        before: Before | None = None,
     ):
         day = date.isoformat() if date else None
-        return service.store.health_reports(day, kind, status, limit, offset)
+        return service.store.health_reports(day, kind, status, limit, offset, before)
 
     @app.get("/api/v1/bots/{bot_id}/messages", response_model=ChatPage)
-    async def chat_messages(bot_id: str, limit: Limit = 50, offset: Offset = 0):
-        return service.chat.page(bot_id, limit, offset)
+    async def chat_messages(
+        bot_id: str, limit: Limit = 50, offset: Offset = 0, before: Before | None = None
+    ):
+        service.chat.bot(bot_id)
+        return service.chat.page(bot_id, limit, offset, before)
 
     @app.post("/api/v1/bots/{bot_id}/messages", response_model=ChatAccepted, status_code=202)
     async def chat_send(bot_id: str, body: ChatSend):
@@ -296,6 +404,21 @@ def create_app(settings=None, service=None):
         return await service.chat.send(
             bot_id, body.text.strip(), body.bot_name, body.harness, body.model
         )
+
+    @app.get("/api/v1/app/bot-preferences", response_model=BotPreferences)
+    def get_bot_preferences():
+        return service.store.bot_preferences()
+
+    @app.put(
+        "/api/v1/app/bot-preferences",
+        response_model=BotPreferences,
+        responses={409: {"model": BotPreferences, "description": "Current preferences"}},
+    )
+    def put_bot_preferences(update: BotPreferencesUpdate, response: Response):
+        applied, current = service.store.update_bot_preferences(update)
+        if not applied:
+            response.status_code = 409
+        return current
 
     @app.get("/api/v1/settings", response_model=RuntimeSettings)
     async def get_settings():

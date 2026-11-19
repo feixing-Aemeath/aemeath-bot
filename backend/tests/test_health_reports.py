@@ -13,9 +13,11 @@ from mcp.server.fastmcp.exceptions import ToolError
 from core.api import create_app
 from core.mcp_server import create_mcp
 from core.models import HealthBatch, PluginPatch, RuntimeSettings
+from core.tokens import Grant
 from harness.base import RunResult
 from plugins.health.reports import (
     ReportConfig,
+    Reports,
     build_input,
     check_report,
     hours_minutes,
@@ -24,7 +26,7 @@ from plugins.health.reports import (
 from tests.test_api import client_for
 from tests.test_health_engine import END, build
 from tests.test_health_plugin import night_samples
-from tests.test_knowledge import as_reader, bot
+from tests.test_knowledge import as_reader, bot, put
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAY = date(2026, 10, 12)
@@ -115,6 +117,40 @@ def test_weekly_summary_compares_with_the_week_before(synthetic):
     assert "week" in bundle and "daily" not in bundle
 
 
+@pytest.mark.parametrize(
+    "grant",
+    [bot(), Grant(None, "topic run", frozenset({"mcp"}), kind="organizer", area="知识库/课程")],
+)
+def test_cached_report_goals_keep_the_current_readers_permissions(service, synthetic, grant):
+    path = "知识库/私人/训练目标.md"
+    secret = "仅在私人主题里的训练约定"
+    put(service, path, secret)
+    service.knowledge.patch_access("知识库/私人", [])
+    reports = Reports(service.db, synthetic, ReportConfig(goals_path=path), service.memory)
+    assert reports.prepare("morning", END, END)["goals"]["text"] == secret
+    with as_reader(grant):
+        with pytest.raises(ValueError, match="没有读取"):
+            service.memory.read(path)
+        bundle = reports.input("morning", END, END)
+        assert bundle["goals"] is None
+        assert secret not in json.dumps(bundle, ensure_ascii=False)
+    # Filtering one caller must not erase the stored report's authorized input.
+    assert reports.input("morning", END, END)["goals"]["text"] == secret
+
+
+def test_cached_report_goals_honor_permission_revocation(service, synthetic):
+    path = "知识库/训练/目标.md"
+    put(service, path, "私人训练目标")
+    service.knowledge.patch_access("知识库/训练", ["Codex"])
+    reports = Reports(service.db, synthetic, ReportConfig(goals_path=path), service.memory)
+    reports.prepare("morning", END, END)
+    grant = service.tokens.check(service.tokens.create("laptop", ["mcp"], reader="Codex")[0])
+    with as_reader(grant):
+        assert reports.input("morning", END, END)["goals"]["text"] == "私人训练目标"
+        service.knowledge.patch_access("知识库/训练", [])
+        assert reports.input("morning", END, END)["goals"] is None
+
+
 def test_manifest_report_defaults_match_code():
     schema = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))["config_schema"]
     properties = schema["properties"]["reports"]["properties"]
@@ -123,6 +159,26 @@ def test_manifest_report_defaults_match_code():
         assert spec["default"] == getattr(defaults, key), key
     with pytest.raises(ValueError):
         ReportConfig.from_dict({"morning_earliest_hour": 11, "morning_deadline_hour": 10})
+
+
+async def test_memory_write_failure_does_not_mark_report_ready(service, monkeypatch):
+    _, plugin = await enable_health(service)
+    try:
+        plugin.reports.prepare("morning", DAY, DAY)
+        body = "个人基线的数据还不足，暂不判断。"
+        with monkeypatch.context() as patch:
+
+            def broken(*_):
+                raise OSError("synthetic disk failure")
+
+            patch.setattr(service.memory, "save", broken)
+            with pytest.raises(OSError, match="synthetic disk failure"):
+                plugin.reports.submit("morning", DAY, "健康简报", body, DAY)
+        assert plugin.reports.status("morning", DAY) == "pending"
+        assert plugin.reports.submit("morning", DAY, "健康简报", body, DAY)["accepted"]
+        assert service.memory.read("健康/晨间简报/2026-10-12.md")["content"].endswith(body + "\n")
+    finally:
+        await service.close()
 
 
 class ScriptedAgent:
@@ -138,6 +194,9 @@ class ScriptedAgent:
 
     async def run(self, prompt, mcp_config, timeout):
         self.prompts.append(prompt)
+        assert "messages_search" not in {tool.name for tool in await self.mcp.list_tools()}
+        with pytest.raises(ValueError, match="^tool_not_allowed$"):
+            await self.mcp.call_tool("messages_search", {"query": "检查"})
         kind = "weekly" if "周报" in prompt.splitlines()[0] else "morning"
         day = prompt.split("health_report_input，参数")[1].split('"date": "')[1][:10]
         bundle = await self.call("health_report_input", {"kind": kind, "date": day})

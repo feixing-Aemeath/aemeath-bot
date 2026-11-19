@@ -9,7 +9,7 @@ from core import helper_process
 from core.apple import MacRequiredBridge
 from core.config import Settings
 from core.lock import InstanceLock
-from core.models import PluginPatch
+from core.models import PluginPatch, TodoPatch
 from core.platforms import command_argv, platform_name, windows_component
 from core.service import Service
 from plugins.token_usage.limits import json_lines
@@ -89,6 +89,37 @@ async def test_windows_skips_mac_plugins_and_accepts_windows_manifests(tmp_path)
             await service.plugins.patch("class_photos", PluginPatch(enabled=True))
     finally:
         await service.close()
+
+
+async def test_windows_readback_skips_old_apple_ids_and_agent_edits_still_work(seeded):
+    todo = (await seeded.add_todo(candidate(seeded)))["todo"]
+    state = seeded.db.rows("SELECT * FROM apple_reminder_state")
+
+    class Bridge(MacRequiredBridge):
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, resource, action, payload):
+            self.calls.append((resource, action))
+            return await super().call(resource, action, payload)
+
+    bridge = Bridge()
+    seeded.apple.bridge = bridge
+    assert await seeded.apple.reconcile() == {
+        "checked": 0,
+        "changed": 0,
+        "failed": 0,
+        "mass_missing": 0,
+    }
+    assert bridge.calls == []
+    updated = await seeded.update_todo(todo["id"], TodoPatch(notes="合成修改"), from_agent=True)
+    assert updated["notes"] == "合成修改"
+    assert updated["sync_status"] == "pending" and updated["sync_error"] == "macos_required"
+    assert updated["reminder_id"] == todo["reminder_id"]
+    assert updated["calendar_event_id"] == todo["calendar_event_id"]
+    assert all(action != "read" for _, action in bridge.calls)
+    assert seeded.db.rows("SELECT * FROM apple_reminder_state") == state
+    assert seeded.db.rows("SELECT todo_id FROM outbox") == [{"todo_id": todo["id"]}]
 
 
 async def test_windows_stop_closes_job_after_launcher_exit(monkeypatch):

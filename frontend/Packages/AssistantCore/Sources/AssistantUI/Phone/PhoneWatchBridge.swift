@@ -25,10 +25,7 @@
 
         @MainActor
         func snapshot() -> WatchSnapshot? {
-            guard let store else { return nil }
-            return WatchSnapshot.make(
-                today: store.today, online: store.online, state: store.assistantState, now: Date(),
-                calendar: store.calendar, plugins: store.plugins)
+            store?.watchSnapshot()
         }
 
         /// Sends the latest snapshot; only the newest one is delivered if the watch is away.
@@ -43,18 +40,7 @@
         @MainActor
         func handle(_ request: WatchRequest) async {
             guard let store else { return }
-            switch request {
-            case .refresh:
-                await store.refresh()
-            case .setDone(let id, let done):
-                let todo =
-                    store.today?.todos.first(where: { $0.id == id })
-                    ?? store.todos.first(where: { $0.id == id })
-                if let todo, (todo.status == .completed) != done {
-                    await store.toggleDone(todo)
-                }
-                await store.refresh()
-            }
+            await store.handleWatchRequest(request)
         }
 
         // MARK: WCSessionDelegate

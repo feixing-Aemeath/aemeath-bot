@@ -23,6 +23,8 @@
         static let trail = Color(light: 0xC9C4B7, dark: 0x5E5C56)
         /// Claude's clay orange, for the send button.
         static let clay = Color(light: 0xD97757, dark: 0xD97757)
+        /// A Bot has said something new.
+        static let unread = Color(light: 0x2F7BF5, dark: 0x4C8DF6)
     }
 
     /// Claude's own typefaces are licensed to Anthropic and cannot ship in the App. The closest
@@ -32,6 +34,8 @@
     enum Typography {
         static func serif(_ size: CGFloat, _ weight: Font.Weight = .semibold) -> Font {
             #if os(iOS)
+                // Grows with the text size chosen in Settings, like the system fonts around it.
+                let size = UIFontMetrics.default.scaledValue(for: size)
                 if ChineseSerif.shared.ready {
                     return Font(ChineseSerif.font(size, weight))
                 }
@@ -39,7 +43,26 @@
             return .system(size: size, weight: weight, design: .serif)
         }
 
-        static var cardTitle: Font { serif(15) }
+        // A card reads title, then body, then the small print, each a step smaller. iOS's body
+        // is 17 points and the Mac's 13, so each platform has its own sizes: on the iPhone the
+        // body used to be larger than the 15-point title above it.
+        #if os(iOS)
+            static var cardTitle: Font { serif(17) }
+            /// A card's text and list rows: 15 points.
+            static let cardBody = Font.subheadline
+            /// Subtitles and labels under a card's text: 13 points.
+            static let cardNote = Font.footnote
+            /// A bold line that leads a card's text: 16 points.
+            static let cardHeadline = Font.callout.weight(.semibold)
+            /// A stat tile's number.
+            static let statNumber = Font.system(size: 28, weight: .semibold, design: .rounded)
+        #else
+            static var cardTitle: Font { serif(15) }
+            static let cardBody = Font.body
+            static let cardNote = Font.subheadline
+            static let cardHeadline = Font.headline
+            static let statNumber = Font.system(size: 24, weight: .semibold, design: .rounded)
+        #endif
         static var pageTitle: Font { serif(28) }
     }
 

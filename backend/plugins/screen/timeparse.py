@@ -58,10 +58,10 @@ def _day(kind, match, today):
     year = int(match["year"]) if kind == "full" else today.year
     try:
         day = date(year, int(match["month"]), int(match["day"]))
+        if kind == "month_day" and day > today:
+            day = date(year - 1, day.month, day.day)  # "12月30日" seen on 1 January
     except ValueError:
         return None
-    if kind == "month_day" and day > today:
-        day = date(year - 1, day.month, day.day)  # "12月30日" seen on 1 January
     return day
 
 

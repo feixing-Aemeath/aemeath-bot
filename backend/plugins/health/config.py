@@ -9,9 +9,10 @@ from plugins.health.metrics import METRICS, VIRTUAL_METRICS
 
 DEVICE_CLASSES = ("watch", "phone", "other")
 # Raised whenever the code stores daily rows differently (2: sleep_minutes counts naps; 3: an
-# uploaded watch whose name lacks "Watch" counts as the watch the export showed it to be), so
+# uploaded watch whose name lacks "Watch" counts as the watch the export showed it to be;
+# 4: exact observation ends, sleep ending at the cutoff, and point cumulative de-duplication), so
 # history derived by an older version is rebuilt like after a settings change.
-DERIVATION = 3
+DERIVATION = 4
 
 # Engineering defaults, not clinically validated cut-offs; see docs/health-methods.md.
 DEFAULT_ALERT_RULES = (

@@ -6,7 +6,12 @@ public enum DueText {
     public static func describe(
         _ todo: Todo, now: Date = Date(), calendar: Calendar = DueText.calendar()
     ) -> String {
-        guard let due = todo.dueAt else { return "无截止时间" }
+        describe(due: todo.dueAt, hasTime: todo.hasTime, pending: todo.status == .pending, now: now, calendar: calendar)
+    }
+
+    /// The same for the watch, which has the deadline without the todo.
+    public static func describe(due: Date?, hasTime: Bool, pending: Bool, now: Date, calendar: Calendar) -> String {
+        guard let due else { return "无截止时间" }
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
         var text: String
         if calendar.isDate(due, inSameDayAs: now) {
@@ -16,10 +21,10 @@ public enum DueText {
         } else {
             text = format(due, "M月d日", calendar)
         }
-        if todo.hasTime {
+        if hasTime {
             text += " " + format(due, "HH:mm", calendar)
         }
-        if todo.status == .pending && isOverdue(todo, now: now, calendar: calendar) {
+        if pending && isOverdue(due: due, hasTime: hasTime, now: now, calendar: calendar) {
             text = "已逾期 · " + text
         }
         return text
@@ -28,7 +33,11 @@ public enum DueText {
     /// A date-only deadline is overdue from the next day on, a timed one from its minute.
     public static func isOverdue(_ todo: Todo, now: Date, calendar: Calendar) -> Bool {
         guard let due = todo.dueAt else { return false }
-        if todo.hasTime { return due < now }
+        return isOverdue(due: due, hasTime: todo.hasTime, now: now, calendar: calendar)
+    }
+
+    public static func isOverdue(due: Date, hasTime: Bool, now: Date, calendar: Calendar) -> Bool {
+        if hasTime { return due < now }
         return calendar.startOfDay(for: due) < calendar.startOfDay(for: now)
     }
 

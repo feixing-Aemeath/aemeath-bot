@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 
 import httpx
 import mcp.types as types
@@ -38,6 +39,10 @@ async def main():
 
         @server.call_tool()
         async def call_tool(name, arguments):
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text="unknown_tool")], isError=True
+                )
             try:
                 response = await client.post(f"/internal/tools/{name}", json=arguments or {})
                 response.raise_for_status()

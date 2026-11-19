@@ -4,7 +4,7 @@ import time
 
 from core import helper_process
 from core.platforms import find_command
-from harness.base import CLIHarness, Usage, count
+from harness.base import CLIHarness, Usage, cli_environment, count
 
 MODELS_TTL = 3600  # seconds a model list read from Codex is kept
 
@@ -17,6 +17,7 @@ async def app_server_models(executable, timeout=20):
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
+        env=cli_environment(),
         limit=1 << 22,
     )
 
@@ -57,6 +58,7 @@ async def app_server_models(executable, timeout=20):
 
 class CodexHarness(CLIHarness):
     executable = "codex"
+    completion_type = "turn.completed"
 
     def __init__(self, workspace):
         super().__init__(workspace)

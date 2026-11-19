@@ -1,6 +1,7 @@
 """Metadata first: only export images taken during a known (or estimated) class."""
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
@@ -91,8 +92,28 @@ class Plugin(BasePlugin):
             items = await self.list_window(start, stop)
             for item in items:
                 previous = self.db.rows(
-                    "SELECT status FROM class_photos_files WHERE id=?", (item["id"],)
+                    "SELECT status,output_path FROM class_photos_files WHERE id=?", (item["id"],)
                 )
+                if previous and previous[0]["status"] == "importing":
+                    try:
+                        exists = safe_path(
+                            self.context.memory.root, previous[0]["output_path"]
+                        ).exists()
+                    except ValueError:
+                        exists = True
+                    if exists:
+                        # Publication may have completed; never replace an unverified file.
+                        self.db.execute(
+                            "UPDATE class_photos_files SET status='conflict' WHERE id=?",
+                            (item["id"],),
+                        )
+                        continue
+                    # The process stopped after saving intent but before linking the image.
+                    self.db.execute(
+                        "DELETE FROM class_photos_files WHERE id=? AND status='importing'",
+                        (item["id"],),
+                    )
+                    previous = []
                 if previous and previous[0]["status"] != "waiting_timetable":
                     continue
                 at = datetime.fromisoformat(item["created_at"]).astimezone(zone_of(self.context))
@@ -227,8 +248,10 @@ class Plugin(BasePlugin):
                 return
             # PhotoKit localIdentifiers often contain '/L0/...'; only use a safe prefix.
             prefix = re.sub(r"[^a-zA-Z0-9_-]", "_", item["id"][:8])
+            fingerprint = hashlib.sha256(item["id"].encode()).hexdigest()[:16]
             relative = (
-                f"知识库/{topic}/课堂照片/{at:%Y-%m-%d}/{at:%H%M}-{prefix}{source.suffix.lower()}"
+                f"知识库/{topic}/课堂照片/{at:%Y-%m-%d}/"
+                f"{at:%H%M}-{prefix}-{fingerprint}{source.suffix.lower()}"
             )
             target = safe_path(self.context.memory.root, relative)
             target.parent.mkdir(parents=True, exist_ok=True)

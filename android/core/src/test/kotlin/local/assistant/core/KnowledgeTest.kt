@@ -4,11 +4,51 @@ package local.assistant.core
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.*
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class KnowledgeTest {
+    @Test
+    fun frequentRefreshesDoNotCancelSlowKnowledgeLoad() = runTest {
+        val revisions = MutableStateFlow(0L)
+        var started = 0
+        var completed = 0
+        val loading = launch {
+            Knowledge.refresh(revisions) {
+                started++
+                delay(5_000)
+                completed++
+            }
+        }
+        runCurrent()
+        repeat(4) {
+            advanceTimeBy(1_000)
+            revisions.value++
+            runCurrent()
+        }
+        assertEquals(1, started)
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(1, completed)
+        assertEquals(2, started)
+        loading.cancelAndJoin()
+    }
+
+    @Test
+    fun leavingKnowledgeStillCancelsTheActiveRead() = runTest {
+        var cancelled = false
+        val loading = launch {
+            Knowledge.refresh(MutableStateFlow(0L)) {
+                try { awaitCancellation() } finally { cancelled = true }
+            }
+        }
+        runCurrent()
+        loading.cancelAndJoin()
+        assertTrue(cancelled)
+    }
+
     @Test
     fun documentedOverviewAndOldAreaDecode() {
         val library = fromFixture<KnowledgeOverview>("knowledge-overview")

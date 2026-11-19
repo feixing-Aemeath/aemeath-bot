@@ -9,6 +9,11 @@ public protocol TokenProvider: Sendable {
     func currentToken() throws -> String?
 }
 
+/// A writable token item; the mirror can be tested without accessing a device's Keychain.
+public protocol MutableTokenStore: TokenProvider {
+    func save(_ token: String) throws
+}
+
 /// A fixed token, for tests and previews.
 public struct StaticTokenProvider: TokenProvider {
     public let token: String?
@@ -26,24 +31,26 @@ public enum KeychainError: Error, Equatable, Sendable {
 }
 
 #if canImport(Security)
-    /// The token in this device's Keychain (a generic password item). Each App target has its
-    /// own Keychain; sharing one item between the iPhone and Mac Apps would need a Keychain
-    /// access group, which this skeleton does not set up.
-    public struct KeychainTokenStore: TokenProvider {
+    /// A device-only generic password; an explicit group can share it with an extension.
+    public struct KeychainTokenStore: MutableTokenStore {
         public let service: String
         public let account: String
+        public let accessGroup: String?
 
-        public init(service: String = "local.assistant.api", account: String = "bearer-token") {
+        public init(service: String = "local.assistant.api", account: String = "bearer-token", accessGroup: String? = nil) {
             self.service = service
             self.account = account
+            self.accessGroup = accessGroup
         }
 
         private var baseQuery: [String: Any] {
-            [
+            var query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account,
             ]
+            if let accessGroup { query[kSecAttrAccessGroup as String] = accessGroup }
+            return query
         }
 
         public func currentToken() throws -> String? {
@@ -81,4 +88,42 @@ public enum KeychainError: Error, Equatable, Sendable {
             }
         }
     }
+#endif
+
+#if canImport(Security)
+/// The App keeps the old private item and mirrors it to the shared group. Mac remains private.
+public struct AppTokenStore: TokenProvider {
+    private let legacy: any MutableTokenStore
+    private let shared: (any MutableTokenStore)?
+    public init(legacy: any MutableTokenStore, shared: (any MutableTokenStore)?) {
+        self.legacy = legacy
+        self.shared = shared
+    }
+    public init(bundle: Bundle = .main) {
+        // No group named: the item the App saved before it had any access group is found
+        // wherever it is. Naming the App's own group here would lose the user's token on a
+        // device where the name in Info.plist came out differently from the group it is in.
+        legacy = KeychainTokenStore()
+        shared = SharedKeychainToken.store(bundle: bundle)
+    }
+    public func currentToken() throws -> String? {
+        if let token = try legacy.currentToken(), !token.isEmpty { return token }
+        return try shared?.currentToken()
+    }
+    public func save(_ token: String) throws {
+        try legacy.save(token)
+        // A missing shared entitlement must not break the App's existing connection.
+        try? shared?.save(token)
+    }
+    public func synchronize() {
+        if let token = try? currentToken(), !token.isEmpty { try? shared?.save(token) }
+    }
+}
+public enum SharedKeychainToken {
+    public static func store(bundle: Bundle = .main) -> KeychainTokenStore? {
+        guard let group = bundle.object(forInfoDictionaryKey: "AssistantSharedKeychainGroup") as? String,
+              !group.isEmpty, !group.contains("$(") else { return nil }
+        return KeychainTokenStore(accessGroup: group)
+    }
+}
 #endif

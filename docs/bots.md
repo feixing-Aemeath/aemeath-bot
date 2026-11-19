@@ -32,7 +32,7 @@ vault/
 | moning | 作业 | homework、timetable |
 | shouanren | 用量 | token_usage |
 | lily_veil | 健康 | health |
-| orange_daisy | 知识库 | knowledge（内置，管知识库）、goodnotes、class_photos、video_notes |
+| orange_daisy | 知识库 | knowledge（内置，管知识库）、goodnotes、class_photos、video_notes、project_progress |
 | carlotta | 记账 | finance（默认停用，只记账） |
 
 `provides` 含 `source` 的插件始终排除，QQ 虽然也用 red_ribbon，仍只是消息来源，不算成绩。插件对话仍要求插件已启用。未来插件使用已有贴图时，自动共用该角色的人设和记忆；贴图为空或尚无映射时，保留原来的插件聊天能力，提示还没有角色目录，不凭插件名创建角色。

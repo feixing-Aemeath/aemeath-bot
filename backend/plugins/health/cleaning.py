@@ -51,12 +51,18 @@ def cumulative_total(samples, start, end, priority):
         best = min(daily, key=lambda s: (stream_rank(s, priority), -s.value))
         share = overlap(best.start, best.end, start, end) / max(1, best.end - best.start)
         return best.value * share, {best.device_class}
-    covered, total, classes = Coverage(), 0.0, set()
+    covered, total, classes, points = Coverage(), 0.0, set(), set()
     for sample in sorted(samples, key=lambda s: (stream_rank(s, priority), s.start, s.end)):
         if sample.end == sample.start:
-            if start <= sample.start < end and not covered.contains(sample.start):
+            key = (sample.start, sample.value)
+            if (
+                start <= sample.start < end
+                and not covered.contains(sample.start)
+                and key not in points
+            ):
                 total += sample.value
                 classes.add(sample.device_class)
+                points.add(key)
             continue
         low, high = max(sample.start, start), min(sample.end, end)
         if high <= low:

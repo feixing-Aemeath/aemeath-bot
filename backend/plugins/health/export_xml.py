@@ -141,7 +141,7 @@ class ExportReader:
             )
         except (KeyError, ValueError):
             minutes = None
-        if minutes is None or end < start:
+        if minutes is None or not 0 <= end - start <= MAX_SPAN:
             self.counts["invalid_workouts"] += 1
             return
         source = attributes.get("sourceName") or "unknown"

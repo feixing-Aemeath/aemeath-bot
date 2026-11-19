@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ from plugins.video_notes.urls import normalize
 
 URL = "https://www.youtube.com/watch?v=abcdefghijk"
 BILI = "https://www.bilibili.com/video/BV1234567890"
+NOW = datetime(2026, 11, 4, 1, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
 FAKE = r"""
 import hashlib
 import json
@@ -129,11 +131,22 @@ def executables(tmp_path):
 
 
 @pytest.fixture
-async def video(service, executables):
+async def video(service, executables, monkeypatch):
+    class Clock(datetime):
+        ticks = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.ticks += 1
+            return (NOW + timedelta(microseconds=cls.ticks)).astimezone(tz)
+
+    monkeypatch.setattr("core.db.datetime", Clock)
+    monkeypatch.setattr(service.daily, "today", lambda: NOW.date())
     mcp = create_mcp(service)
     await service.start()
     await service.plugins.patch("video_notes", PluginPatch(enabled=True, config=executables.config))
     plugin = service.plugins.instances["video_notes"]
+    plugin.now = lambda: NOW
     try:
         yield service, plugin, mcp
     finally:
@@ -190,6 +203,20 @@ async def test_queue_validation_dedup_limit_and_topic(video):
     plugin.queue.update(first["id"], status="done")
     await plugin.add({"url": BILI})
     assert plugin.queue.list()["total"] == 51  # limit is unfinished work, not lifetime history
+
+
+async def test_failed_video_retry_respects_the_unfinished_queue_limit(video):
+    _, plugin, _ = video
+    first = await plugin.add({"url": URL})
+    plugin.queue.update(first["id"], status="failed")
+    for index in range(50):
+        await plugin.add({"url": f"https://youtu.be/{index:011d}"})
+    with pytest.raises(ConflictError, match="video_queue_full"):
+        await plugin.add({"url": URL})
+    assert plugin.queue.get(first["id"])["status"] == "failed"
+    queued = plugin.queue.pending(50)[0]
+    plugin.queue.update(queued["id"], status="done")
+    assert (await plugin.add({"url": URL}))["status"] == "queued"
 
 
 async def test_subtitle_source_slides_daily_and_organizer_path(video, executables):
@@ -339,6 +366,7 @@ async def test_interrupt_asr_restores_from_last_chunk_in_new_instance(video, exe
     assert plugin.queue.state(plugin.queue.get(item["id"]))["asr_offset"] == 300
     resumed = Plugin()
     await resumed.setup(plugin.context, plugin.config)
+    resumed.now = lambda: NOW
     await resumed.process()
     assert resumed.queue.get(item["id"])["status"] == "done"
     assert len(executables.calls("mlx_whisper")) == 4
@@ -431,7 +459,7 @@ async def test_cards_window_and_private_topic(video):
     assert "已存入知识库" in str(await plugin.cards())
     plugin.queue.update(item["id"], status="failed", error="需要登录")
     assert "失败：需要登录" in str(await plugin.cards())
-    old = (datetime.now(UTC) - timedelta(days=4)).isoformat()
+    old = (plugin.now().astimezone(UTC) - timedelta(days=4)).isoformat()
     service.db.execute("UPDATE video_queue SET updated_at=?", (old,))
     assert await plugin.cards() == []
     plugin.queue.update(item["id"], status="needs_setup", error="需要先装语音识别")

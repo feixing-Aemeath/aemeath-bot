@@ -18,6 +18,10 @@ uv run python -m scripts.demo
 
 API 时区默认 Asia/Shanghai。`PATCH /api/v1/settings` 可以修改时区、cron、置信度、重试和任务优先 harness。禁用 scheduler 的环境变量为 `ASSISTANT_SCHEDULER_ENABLED=false`。数据库路径默认 `.state/assistant.sqlite3`，记忆可用 `ASSISTANT_VAULT_DIR` 指向已有 Obsidian vault。设置会持久化到数据库。
 
+数据库启动时自动升级到 `PRAGMA user_version=9`：重算已有成绩的课程键，并把课表结束时间加入主键。升级在事务中完成，失败回滚，可重复启动；保留现有行、成绩发布时间和日历同步凭据。旧版因键冲突已经覆盖的成绩或课程无法从数据库恢复，需要重新导入成绩表或读取课表。
+
+macOS/Linux 上，数据目录收紧为 `0700`，SQLite 数据库及 `-wal`、`-shm` 为 `0600`，已有文件也会收紧。启动还会收紧已有备份中的目录和文件（跳过符号链接）。Windows 跳过 chmod，使用系统 ACL。
+
 ## 飞书 OAuth
 
 1. 飞书开放平台创建自建应用，启用用户授权，申请并发布历史消息读取权限和离线授权。精确可申请的用户权限以该应用控制台为准，不能假定管理员已经授权。
@@ -96,6 +100,67 @@ helper 只修改专属「AI 待办」提醒事项列表，以及「AI 待办」�
 
 在 Mac mini 上验证过（2026-10-24）：提醒事项和日历的创建、重复删除都成功。这条记录不包含本次新增闹钟和「AI 课表」的真机验收。之后在 `.env` 设 `ASSISTANT_APPLE_MODE=real` 和 `ASSISTANT_APPLE_BINARY=<上面的绝对路径>`。
 
+### 提醒事项回读
+
+`reminders read` 从 stdin 接收 `{"reminder_ids":["苹果实体 ID", "另一个 ID"],"client_ids":["待办 ID", "另一个待办 ID"]}`（可选 `timezone`，`client_ids` 与 `reminder_ids` 一一对应），一次读取所有账号里名为「AI 待办」的列表，包含已完成项。列表查询缺失的 ID 再在同一进程中按 ID 查找，识别移到其他列表的项目，不扫描其他列表的全文。它只检查已有授权，不弹授权框、不创建列表、不写入项目。成功响应为 `{"list_ids":["专用列表 ID"],"items":[...]}`；每个请求 ID 对应一个结果，字段为 `id,current_id,exists,list_id,completed,completed_at,title,due_at,has_time,last_modified_at`。按 ID 找不到时再按写入时留的 `assistant-todo://<待办 ID>` 标记找：找到说明苹果换了 ID（官方文档说全量同步时可能发生），`current_id` 给出新 ID，后端改绑；否则 `current_id` 为 null。时间使用带时区、毫秒精度的 ISO 8601；不存在的项目除 `id,exists` 外全部为 null。`exists=true` 的 `list_id` 可以不在专用列表中，表示项目移出了管理范围，后端暂停该项目的同步，直到它移回来。
+
+无授权、无列表、读取失败分别向 stderr 输出 `apple_reminders_denied`、`apple_reminders_list_unavailable`、`apple_reminders_read_failed`，退出码为 1。Python 桥只保留这几个固定错误码，不记录原始错误或聊天内容。`apple_sync` 作业统一记录 `apple_sync_failed`，沿用 watchdog 的持续失败告警和恢复机制。
+
+每 5 分钟的 `apple_sync` 先批量回读，再重试 outbox；没有变化时只有一次 helper 读取，没有逐条启动进程，也不写入苹果。完成和取消完成更新本地状态及来源，仅把必要的日历同步放进 outbox，不向提醒事项写回。已完成项目继续回读，已删除项目不再回读。即时 outbox 写入前也会批量回读待写的已有项目，首次缺失后只由定时轮询确认，不因 App/Agent 连续调用而加速删除。读取失败时暂停已有提醒事项的 upsert，独立的新建、删除和日历重试仍会尝试，作业统一报错交给 watchdog。
+
+outbox 持久化本地实际修改的字段，同一字段上尚未发送的 App 修改优先；只改备注不阻止手机端标题、日期和完成状态回读，两端改不同字段会合并。Agent 修改前先回读并检查字段保护，检查、本地保存和写入共用同步锁，其他 App 修改不能插入检查之间。新的迁移保留旧行和 outbox revision；旧 outbox 无法确定改过哪些字段，保守地按标题、日期和状态都待发送处理，首轮写入后清空。每次成功读写保存苹果的最后修改时间，忽略更旧的 iCloud 快照，避免旧值重新打开任务或误加字段保护；苹果未提供修改时间时无法判定快照先后。
+
+已有提醒事项的 upsert 另带 `require_existing=true` 和 `expected_modified_at`（上次回读的苹果修改时间，可空）。Swift 在取到当前项目后核对 ID 和版本；项目已删除、移走或版本变化就中止本次写入，保留 outbox，下一轮重新回读合并。这样回读完成后、helper 查找项目之前发生的手机操作也不会被旧 payload 覆盖。需要配套部署本次新版 helper。EventKit 和 iCloud 不提供跨设备的原子比较并写入，因此版本检查之后才到达的远端变更仍需真机验证。
+
+标题、截止日期和具体时刻的修改也以提醒事项里的值更新本地待办，并同步日历副本；清除截止时间或改为只有日期时删除原日历副本。`user_modified_fields` 持久保存用户改过的字段，Agent 的 MCP `todos_update` 不再允许覆盖它们，返回固定错误码 `todo_fields_user_modified`，整次修改不部分生效；用户仍可从 App 修改。时间按 EventKit 的秒精度比较，只有日期时比较运行时区中的日期，避免把格式和时区表示变化误认成用户改期。回读遵守原有标题长度等校验；若字段不合法，或用户改出的标题和截止时间正好与另一待办的去重键相同，该项保留原有标题和时间并记 `apple_reminder_edit_rejected`，状态回读和其他项目继续同步，待用户调整标题或时间后自动恢复。
+
+第一次找不到项目只持久化缺失记录并暂停它的 outbox 写回；下次成功轮询仍找不到，且距首次至少 5 分钟，才按用户删除处理，日历删除失败继续持久化重试，提醒事项不会被重建。失败读取会打断连续缺失计数；原列表不再可见时不删除。升级前的旧待办若没有原列表 ID，首次缺失只暂停同步，必须先成功看到该项目才能确认原列表，不能因另一个账号有同名列表而推断删除。缺失记录和日历单独重试标记均保存在 SQLite，重启不会丢失。回读改标题或日期时还会保存旧去重键，之后按原通知重新提炼仍合并到同一待办，已删除项不会因此重建。Linux/Windows 默认仍使用 `FakeAppleBridge`，真实桥在非 Mac 上报 `macos_required`；假桥提供 `change_reminder`、`delete_reminder` 以模拟手机端操作。
+
+本次只编译检查 helper、使用假实现测试，未执行真实 EventKit 操作。真机验收由 Claude 在审查后执行：沿用固定签名的安装流程并检查权限；确认多账号同名列表、完成时间、取消勾选、日期和具体时刻的读取；删除单项后观察两轮同步及日历清理；撤销权限或暂时隐藏列表时确认待办保留、watchdog 只持续跟踪同一故障，恢复后能继续同步。任务 worktree 内不要签名、安装或执行刚编出的 helper，也不要重启线上后端。
+
+写入成功的提醒事项响应还包含 `list_id,last_modified_at`，用于在第一次回读前记住原列表和已写入版本；之后原账号的列表消失，即使其他账号还存在同名列表，也不会被误判为用户删除单项。回读使用 EventKit 的批量提醒事项查询，见 [Apple 官方文档](https://developer.apple.com/documentation/eventkit/retrieving-events-and-reminders)。真机还需验证修改标题、增删截止日期和时刻后，App 与日历副本更新，Agent 覆盖被拒绝，App 主动修改仍成功；移出专用列表时不会误删，移回来后恢复。
+已完成的待办在提醒事项里被清除（「清除已完成」）时不算删除：确认缺失后只清空 `reminder_id`，待办仍是已完成，日历副本保留，也不再补写新提醒；从 App 重新打开时才新建一条。
+
+iCloud 全量同步可能让 ID 变化，上面的标记能把它们认回来；标记也丢了的话，一次轮询里至少 3 条且不少于一半未完成项同时缺失时，都只暂停写回、不算删除，作业报 `apple_reminders_mass_missing`，watchdog 超过 3 小时后在 App 里提示。确实是用户自己删的，在 App 里也删掉，剩下的低于阈值就恢复正常判断。只有定时的全量轮询才会把缺失确认成删除，单条写入和 Agent 修改前的回读不会。
+
+回读改出的标题过长或与另一条待办完全相同时，作业报 `apple_reminder_edit_rejected`，在提醒事项里改一下那条就恢复。
+
+### 部署前只读核对
+
+先准备一份通过 SQLite backup API 生成的、没有进程继续写入的独立数据库副本。在 `backend/` 下运行：
+
+```bash
+uv run --locked python -m scripts.predeploy_check --db /path/to/backup.sqlite3
+uv run --locked python -m scripts.predeploy_check --db /path/to/backup.sqlite3 --apple-sync /path/to/new/apple-sync
+```
+
+脚本不读取 `.env` 或 token，不启动后端、不迁移数据库。数据库以 `mode=ro&immutable=1` 打开，避免 WAL 模式的副本产生旁文件；有 `-wal`、`-shm` 或 `-journal` 的副本会报 `db_sidecars_present`，请重新生成独立备份，不要直接删除旁文件。指定 helper 时只执行一次 `reminders read`，检查已有授权，不弹授权框、不写入苹果数据。应指定支持回读的新版本 helper。
+
+输出只有固定标签、计数和错误码，不含标题、备注、消息、人名、任何实体 ID 或文件路径。`db.user_version` 是原始版本；`db.integrity_errors`、`db.foreign_key_errors` 为检查发现的问题条数，正常均为 0。其余 `db.*` 统计各状态待办、非空提醒事项和日历 ID、outbox，以及 `apple_reminder_state` 是否存在（0/1）和缺少有效状态行的提醒事项数。状态行的待办及提醒事项 ID 都匹配才算有效。
+
+数据库计数包含所有待办；苹果对比只检查核心会回读的未完成和已完成待办，跳过已删除、已取消和仅在 App 内展示的来源（如 watchdog）。`apple.requested` 是请求数，`apple.read` 是返回结果数（包含缺失项），`apple.found` 是实际找到的项目数，`apple.lists` 是可见的专用列表数。每条待办只归入下面一个分类，先判断缺失和移出列表，再比较标题、日期，最后比较完成状态：
+
+| 输出分类 | 部署含义 |
+| --- | --- |
+| `apple.consistent` | 存在且标题、日期、完成状态一致 |
+| `apple.status_only` | 只有完成状态不同，包括手机勾选或取消勾选；回读会合并状态 |
+| `apple.title_or_date_changed` | 标题、截止日期或是否有具体时刻不同；回读接受后标记为「用户改过」，后续 Agent 不能再改这些字段 |
+| `apple.missing` | 按旧 ID 和待办 marker 都找不到；升级前没有有效状态行的旧项目无法确认原列表，会一直挂起同步，需要人工决定如何处理 |
+| `apple.other_list` | 项目存在但已移到其他列表，同步挂起，移回专用列表后才恢复 |
+
+`apple.current_id_changed` 另外统计苹果换了 ID、由 marker 找回的数量，与上述分类重叠；核心会改绑新 ID，本身不阻止部署。比较复用 `core.apple.ReminderBatch` 和 `reminder_changes`，按运行设置的时区比较日期、按秒比较具体时刻。分类描述当前副本和苹果快照的差异；实际合并仍受未发送的 outbox 字段、旧快照和字段校验影响，因此不能据此断言每条差异都会立即应用。有有效历史状态行的缺失项目则沿用核心的连续轮询确认规则。
+
+最后一行是 `可以部署`（退出码 0），或 `需要先看一下：<原因代码>`（退出码 1，参数错误为 2）。以下原因需要处理或审查：
+
+- `reminders_user_modified_fields`：确认接受手机端字段和后续 Agent 字段保护。
+- `reminders_missing_manual_decision`：缺失项目需要人工决定；脚本不会重建、解绑或删除。
+- `reminders_other_list_sync_held`：移出专用列表的项目会挂起同步。
+- `outbox_pending`：存在尚未发送的写入，先审查队列影响。
+- `apple_check_skipped`：未提供 `--apple-sync`，只完成数据库检查，不能据此判定完整部署就绪。
+- `apple_sync_not_found`、`apple_sync_unavailable`：helper 不存在或无法执行。
+- `apple_reminders_denied`、`apple_reminders_list_unavailable`、`apple_reminders_read_failed`、`apple_reminders_timeout`：未授权、专用列表不可见、读取失败或超过 30 秒；原始错误不会输出。
+- `db_*`、`arguments_invalid`：数据库打开、结构、完整性、外键、设置、待办日期或参数有问题；`db.todos.unknown` 只汇总未知状态，不打印状态原文。
+
 ## QQ / 微信屏幕 helper（screen-helper）
 
 `backend/helpers/screen-helper` 是 Swift 写的只读截图助手（QQ、微信读取和课表共用），安装脚本把它装到 `~/Library/Application Support/AemeathBot/bin/screen-helper`（规则和 apple-sync 一样：没有改动不重新复制）。插件配置里的 `helper` 填这个绝对路径。它和 apple-sync 一样放弃父进程的责任，所以**屏幕录制**要授权给 screen-helper 本身，不是 Python；只有关闭预览模式、让它点开会话和滚动时，才需要**辅助功能**。
@@ -121,7 +186,7 @@ launchctl kickstart -k gui/$(id -u)/local.assistant
 
 ## 备份与恢复
 
-每天本地 03:00 使用 SQLite 在线 backup API 和 Markdown vault 创建 `.state/backups/<时间>/`，完成后写 COMPLETE。没有自动删除历史备份。备份同样含私人资料，应由用户复制到独立受保护磁盘；本机磁盘坏掉时同盘备份不能救援。
+每天按设置的时区在 03:00 使用 SQLite 在线 backup API 和 Markdown vault 创建 `.state/backups/<时间>/`，完成后写 COMPLETE。启用调度时，启动后若没有完整备份或最新 COMPLETE 已超过 24 小时，会立即补做一次。复制在工作线程运行；取消会等待线程结束，复制失败会清理本次未完成目录。没有自动删除历史备份。备份同样含私人资料，应由用户复制到独立受保护磁盘；本机磁盘坏掉时同盘备份不能救援。
 
 恢复前停止后端，保留故障目录副本。从带 COMPLETE 的备份取数据库与 vault 放回指定位置，再启动；不要混用 WAL/SHM 旁文件。运行 `memory_index` 重建搜索索引。AppleSync 使用保存的 ID 与 client UUID 恢复幂等同步。当前备份不包含截图或 OAuth token，后者可重新授权。
 

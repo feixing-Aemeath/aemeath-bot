@@ -5,6 +5,7 @@ take an umbrella when rain is likely, what to wear by the felt temperature, suns
 UV index is high. The Agent only words the morning reminder from these (plugin.py).
 """
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -175,15 +176,28 @@ def fetch(latitude, longitude, timezone, get=None):
         raise WeatherError("weather_unreachable") from error
     if response.status_code != 200:
         raise WeatherError("weather_request_failed")
-    data = response.json()
-    if not isinstance(data.get("daily"), dict) or not data["daily"].get("time"):
-        raise WeatherError("weather_bad_answer")
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise WeatherError("weather_bad_answer") from error
+    days(data)
     return data
 
 
 def days(data):
     """The forecast's days, with each day's rainy daytime hours."""
+    try:
+        return _days(data)
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError) as error:
+        raise WeatherError("weather_bad_answer") from error
+
+
+def _days(data):
+    if not isinstance(data, dict) or not isinstance(data.get("daily"), dict):
+        raise ValueError("missing daily forecast")
     daily, hourly = data["daily"], data.get("hourly") or {}
+    if not isinstance(daily.get("time"), list) or not daily["time"] or not isinstance(hourly, dict):
+        raise ValueError("missing forecast dates")
     rainy = {}
     for stamp, chance in zip(
         hourly.get("time") or [], hourly.get("precipitation_probability") or [], strict=False
@@ -192,27 +206,39 @@ def days(data):
         if chance is not None and chance >= RAIN_LIKELY and moment.hour in DAYTIME:
             rainy.setdefault(moment.date(), []).append(moment.hour)
 
-    def value(name, index, default=0.0):
-        found = (daily.get(name) or [])[index : index + 1]
-        return float(found[0]) if found and found[0] is not None else default
+    def value(name, index):
+        found = daily[name][index]
+        if (
+            isinstance(found, bool)
+            or not isinstance(found, int | float)
+            or not math.isfinite(found)
+        ):
+            raise ValueError("missing forecast value")
+        return float(found)
 
     result = []
     for index, stamp in enumerate(daily["time"]):
-        day = date.fromisoformat(stamp)
-        code = int(value("weather_code", index, -1))
-        result.append(
-            Day(
-                date=day,
-                text=CODES.get(code, "未知"),
-                high=value("temperature_2m_max", index),
-                low=value("temperature_2m_min", index),
-                felt_high=value("apparent_temperature_max", index),
-                felt_low=value("apparent_temperature_min", index),
-                rain_chance=int(value("precipitation_probability_max", index)),
-                rain_mm=value("precipitation_sum", index),
-                uv=value("uv_index_max", index),
-                wind=value("wind_speed_10m_max", index),
-                rain_hours=tuple(rainy.get(day, [])),
+        try:
+            day = date.fromisoformat(stamp)
+            code = int(value("weather_code", index))
+            result.append(
+                Day(
+                    date=day,
+                    text=CODES.get(code, "未知"),
+                    high=value("temperature_2m_max", index),
+                    low=value("temperature_2m_min", index),
+                    felt_high=value("apparent_temperature_max", index),
+                    felt_low=value("apparent_temperature_min", index),
+                    rain_chance=int(value("precipitation_probability_max", index)),
+                    rain_mm=value("precipitation_sum", index),
+                    uv=value("uv_index_max", index),
+                    wind=value("wind_speed_10m_max", index),
+                    rain_hours=tuple(rainy.get(day, [])),
+                )
             )
-        )
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+            # The first day is today: without it the last good forecast is worth more. A later
+            # day missing one value is left out rather than costing the rest of the answer.
+            if index == 0:
+                raise
     return result

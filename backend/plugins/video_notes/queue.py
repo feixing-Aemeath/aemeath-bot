@@ -73,12 +73,25 @@ class Queue:
             if row["status"] == "failed":
                 # Sending the link again tries again: the network was down, or the downloader
                 # was broken and has been fixed since.
-                self.db.execute(
-                    "UPDATE video_queue SET status='queued',step='queued',error=NULL,attempts=0,"
-                    "state_json='{}',updated_at=? WHERE id=? AND status='failed'",
-                    (now(), row["id"]),
-                )
-                row = self.db.rows("SELECT * FROM video_queue WHERE id=?", (row["id"],))[0]
+                with self.db.connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    row = dict(
+                        connection.execute(
+                            "SELECT * FROM video_queue WHERE id=?", (row["id"],)
+                        ).fetchone()
+                    )
+                    if row["status"] == "failed":
+                        self.check_capacity(connection)
+                        connection.execute(
+                            "UPDATE video_queue SET status='queued',step='queued',error=NULL,attempts=0,"
+                            "state_json='{}',updated_at=? WHERE id=?",
+                            (now(), row["id"]),
+                        )
+                        row = dict(
+                            connection.execute(
+                                "SELECT * FROM video_queue WHERE id=?", (row["id"],)
+                            ).fetchone()
+                        )
             return view(row)
         self.ensure_topic(topic)
         with self.db.connect() as connection:
@@ -90,13 +103,7 @@ class Queue:
             ).fetchone()
             if row:
                 return view(dict(row))
-            if (
-                connection.execute(
-                    "SELECT count(*) FROM video_queue WHERE status IN ('queued','processing','needs_setup')"
-                ).fetchone()[0]
-                >= 50
-            ):
-                raise ConflictError("video_queue_full")
+            self.check_capacity(connection)
             # Use Knowledge's validation, safe paths and default reader initialization.
             # topic() uses another SQLite connection, so do not call it inside this transaction.
             identity, timestamp = uid(), now()
@@ -107,6 +114,14 @@ class Queue:
             )
             connection.execute("INSERT INTO video_urls VALUES(?,?)", (url, identity))
         return view(self.get(identity))
+
+    @staticmethod
+    def check_capacity(connection):
+        count = connection.execute(
+            "SELECT count(*) FROM video_queue WHERE status IN ('queued','processing','needs_setup')"
+        ).fetchone()[0]
+        if count >= 50:
+            raise ConflictError("video_queue_full")
 
     def ensure_topic(self, name):
         self.knowledge.validate_topic(name)

@@ -51,6 +51,47 @@
         }
     }
 
+    /// 「立即提炼」 in the assistant's header: a small outlined capsule (the Agent card's big
+    /// button was the loudest thing on the page for the least used action); a spinner and
+    /// 「提炼中」 while a job runs.
+    struct RunNowChip: View {
+        @EnvironmentObject private var store: AppStore
+        @State private var starting = false
+
+        var body: some View {
+            let running = store.isJobRunning || starting
+            Button {
+                starting = true
+                Task {
+                    await store.runNow()
+                    starting = false
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    if running {
+                        ProgressView().controlSize(.mini)
+                        Text("提炼中")
+                    } else {
+                        Image(systemName: "sparkles").font(.caption.weight(.semibold))
+                        Text("立即提炼")
+                    }
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Palette.card))
+                .overlay(Capsule().strokeBorder(Palette.hairline))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.online || running)
+            .opacity(store.online ? 1 : 0.5)
+            .help("现在就提炼一次待办")
+            .accessibilityLabel(running ? "正在提炼待办" : "立即提炼待办")
+        }
+    }
+
     /// One run in two lines, for narrow screens.
     struct RunRow: View {
         let run: Run
@@ -114,7 +155,7 @@
                     RunNowButton()
                 }
             }
-            .padding(12)
+            .padding(CardSurface.padding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardSurface()
         }

@@ -44,7 +44,16 @@ def classify(output: str):
     lower = output.lower()
     if any(
         word in lower
-        for word in ("rate_limit", "rate limit", "quota", "usage limit", "credit balance")
+        for word in (
+            "rate_limit",
+            "rate limit",
+            "quota",
+            "usage limit",
+            "usage_limit",
+            "credit balance",
+            "insufficient balance",
+            "hit your limit",
+        )
     ):
         return "quota_exhausted"
     if any(
@@ -54,8 +63,17 @@ def classify(output: str):
     return "agent_failed"
 
 
+def cli_environment():
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("ASSISTANT_", "FEISHU_"))
+    }
+
+
 class CLIHarness:
     executable = ""
+    completion_type = None
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -78,12 +96,8 @@ class CLIHarness:
     async def run(self, prompt, mcp_config, timeout, model=None) -> RunResult:
         if not self.available():
             return RunResult(False, "cli_unavailable")
-        env = os.environ.copy()
+        env = cli_environment()
         env.update(mcp_config["environment"])
-        # A child never needs unrelated app secrets. Model/CLI login remains managed by its CLI.
-        for key in list(env):
-            if key.startswith("FEISHU_"):
-                env.pop(key)
         command = self.command(mcp_config, model) if model else self.command(mcp_config)
         command[0] = find_command(command[0]) or command[0]
         proc = await helper_process.start(
@@ -109,6 +123,7 @@ class CLIHarness:
         # Only token counts are kept.
         output = (stdout + stderr).decode(errors="replace")
         usage, failure = None, None
+        completed = self.completion_type is None
         for line in stdout.decode(errors="replace").splitlines():
             try:
                 item = json.loads(line)
@@ -120,6 +135,10 @@ class CLIHarness:
             if found:
                 usage = found if usage is None else usage + found
             kind = item.get("type")
+            if kind == "turn.started":
+                completed = False
+            if kind == self.completion_type:
+                completed = True
             if item.get("is_error") or kind in {"error", "turn.failed"}:
                 failure = classify(line)
             elif kind == "turn.completed":
@@ -130,4 +149,6 @@ class CLIHarness:
             return RunResult(False, classify(output), usage)
         if failure:
             return RunResult(False, failure, usage)
+        if not completed:
+            return RunResult(False, "agent_incomplete", usage)
         return RunResult(True, usage=usage)

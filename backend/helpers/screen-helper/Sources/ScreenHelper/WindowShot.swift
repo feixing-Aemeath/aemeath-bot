@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
@@ -18,12 +19,14 @@ import ScreenCaptureKit
 /// such as text or avatars never does that. The fractions in `Regions.fallback` are used when
 /// a divider is not found.
 struct WindowShot {
+    let windowID: CGWindowID
     let image: CGImage
     /// The window in global screen points (the coordinates input events use).
     let frame: CGRect
     let regions: Regions
 
-    static func take(of app: App) async throws -> WindowShot {
+    /// `locked`: the regions page 0 of this read found (see RegionLock), used when they fit.
+    static func take(of app: App, locked: RegionLock? = nil) async throws -> WindowShot {
         guard app.running != nil else { throw HelperError.appNotRunning }
         let content: SCShareableContent
         do {
@@ -40,7 +43,10 @@ struct WindowShot {
         guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
         else { throw HelperError.windowNotFound }
         let image = try await capture(window)
-        return WindowShot(image: image, frame: window.frame, regions: Regions.detect(Pixels(image)))
+        let regions = RegionLock.regions(locked: locked, width: image.width, height: image.height) {
+            Regions.detect(Pixels(image))
+        }
+        return WindowShot(windowID: window.windowID, image: image, frame: window.frame, regions: regions)
     }
 
     /// The window alone, at its pixel size, also where other windows cover it.
@@ -57,6 +63,53 @@ struct WindowShot {
         } catch {
             throw HelperError.captureFailed
         }
+    }
+
+    /// Guard global input with the captured window's identity, frame and hit-test. A
+    /// covered, moved or background window must not redirect our click/scroll elsewhere.
+    func checkInput(app: App, at point: CGPoint) throws {
+        try Permissions.checkInput()
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+            if session["kCGSessionLoginDoneKey"] as? Bool == false { throw HelperError.loginWindow }
+            if session["kCGSSessionOnConsoleKey"] as? Bool == false { throw HelperError.sessionInactive }
+            if session["CGSSessionScreenIsLocked"] as? Bool == true { throw HelperError.locked }
+        }
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == app.bundleID,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                       kCGNullWindowID) as? [[String: Any]],
+              Self.inputTarget(windows: windows, at: point, windowID: windowID, frame: frame,
+                               passThrough: Self.dockProcesses())
+        else { throw HelperError.windowObscured }
+    }
+
+    /// The Dock keeps a transparent window over the whole screen, above every app's window
+    /// (layer 20), and lets clicks through. Counted as cover it "obscured" every point of
+    /// every window: seen on the Mac this runs on, where it is the second window from the
+    /// front at 3200x1800.
+    static func dockProcesses() -> Set<pid_t> {
+        Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").map(\.processIdentifier))
+    }
+
+    /// Whether a click at `point` lands in the captured window: the frontmost window there
+    /// must be that one, still where it was. `passThrough` processes' windows above the normal
+    /// layer are skipped (the Dock's overlay); a normal window of any process still covers.
+    static func inputTarget(windows: [[String: Any]], at point: CGPoint,
+                            windowID: CGWindowID, frame: CGRect, passThrough: Set<pid_t> = []) -> Bool {
+        guard let hit = windows.first(where: { window in
+            guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0, rect.contains(point)
+            else { return false }
+            if let owner = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+               passThrough.contains(owner), (window[kCGWindowLayer as String] as? Int ?? 0) != 0 {
+                return false
+            }
+            return true
+        }), hit[kCGWindowNumber as String] as? UInt32 == windowID,
+              let bounds = hit[kCGWindowBounds as String] as? [String: Any],
+              CGRect(dictionaryRepresentation: bounds as CFDictionary) == frame
+        else { return false }
+        return true
     }
 
     func crop(_ rect: CGRect) -> CGImage {
@@ -94,7 +147,7 @@ struct WindowShot {
     }
 }
 
-struct Regions {
+struct Regions: Equatable {
     var list: CGRect
     var header: CGRect
     var chat: CGRect
@@ -200,13 +253,12 @@ struct Pixels {
         return result
     }
 
-    /// A coarse summary of the picture, to tell whether scrolling changed anything.
+    /// Include every pixel and the dimensions: sparse text can fall between sample points.
     var fingerprint: String {
-        let step = max(1, data.count / 4096)
         var hash: UInt64 = 1_469_598_103_934_665_603
-        for index in stride(from: 0, to: data.count, by: step) {
-            hash = (hash ^ UInt64(data[index] / 8)) &* 1_099_511_628_211
+        for pixel in data {
+            hash = (hash ^ UInt64(pixel)) &* 1_099_511_628_211
         }
-        return String(hash, radix: 16)
+        return "\(width)x\(height):\(String(hash, radix: 16))"
     }
 }

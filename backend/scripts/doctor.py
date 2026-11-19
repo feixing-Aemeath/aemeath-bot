@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -152,6 +152,11 @@ class SystemProbe:
         except sqlite3.Error:
             return None
         return {client for client, value in rows if value in (2, 3)}  # allowed / limited
+
+    def displays_asleep(self):
+        from plugins.screen.session import displays_asleep
+
+        return displays_asleep()
 
     def newest_backup(self, data_dir):
         stamps = [p.stat().st_mtime for p in Path(data_dir).glob("backups/*/COMPLETE")]
@@ -382,7 +387,9 @@ def check_system(report):
         ("display_awake", "显示器不睡眠"),
         ("auto_login", "自动登录"),
         ("filevault", "FileVault（建议关闭）"),
-        ("lock_screen", "不锁屏"),
+        ("lock_screen", "自动锁屏策略"),
+        ("desktop_session", "当前桌面会话可读取"),
+        ("display_power", "当前显示器唤醒"),
         ("screensaver", "屏幕保护程序不启动"),
         ("display_attached", "接有显示器或 HDMI 欺骗器"),
     ):
@@ -478,11 +485,16 @@ def check_system(report):
     lock = probe.run(["sysadminctl", "-screenLock", "status"])
     lock_text = lock.text.lower() if lock else ""
     if "screenlock is off" in lock_text:
-        report.add("lock_screen", "不锁屏", "ok", "屏幕锁定已关闭")
+        report.add(
+            "lock_screen",
+            "自动锁屏策略",
+            "ok",
+            "自动锁屏策略已关闭；这不代表当前会话已解锁或在前台",
+        )
     elif "delay is" in lock_text or "immediate" in lock_text:
         report.add(
             "lock_screen",
-            "不锁屏",
+            "自动锁屏策略",
             "fail",
             "屏幕保护或关闭显示器后需要密码",
             "系统设置 → 锁定屏幕 → 「屏幕保护程序启动或显示器关闭后需要密码」选「永不」",
@@ -490,11 +502,48 @@ def check_system(report):
     else:
         report.add(
             "lock_screen",
-            "不锁屏",
+            "自动锁屏策略",
             "manual",
             "sysadminctl 没有给出可识别的结果",
-            "系统设置 → 锁定屏幕 → 「屏幕保护程序启动或显示器关闭后需要密码」选「永不」",
+            "在系统设置 → 锁定屏幕核对「需要密码」选项；若已为「永不」，继续检查当前桌面会话和显示器，不要重复改策略。",
         )
+    # A policy is not runtime state. Share the exact classifier used by screen reads.
+    from plugins.screen.session import CONSOLE_COMMAND, DESKTOP_HINTS, console_state
+
+    console = probe.run(CONSOLE_COMMAND, timeout=10)
+    state = console_state(console.out.encode() if console and console.code == 0 else b"", probe.uid)
+    asleep = probe.displays_asleep()
+    desktop = replace(state, display_asleep=asleep)
+    details = ", ".join(f"{key}={value}" for key, value in desktop.details().items())
+    if state.code:
+        report.add(
+            "desktop_session", "当前桌面会话可读取", "fail", details, DESKTOP_HINTS[state.code]
+        )
+    elif state.on_console is True and state.login_done is True and state.locked is False:
+        report.add("desktop_session", "当前桌面会话可读取", "ok", details)
+    else:
+        report.add(
+            "desktop_session",
+            "当前桌面会话可读取",
+            "manual",
+            details,
+            "无法确认当前会话状态，请在 Mac 上确认已登录、解锁且运行后端的用户桌面在前台；不要仅据此修改锁屏策略。",
+        )
+    report.add(
+        "display_power",
+        "当前显示器唤醒",
+        "manual" if asleep is None else "fail" if asleep else "ok",
+        "无法读取在线显示器状态"
+        if asleep is None
+        else "全部在线显示器睡眠"
+        if asleep
+        else "有在线显示器处于唤醒状态",
+        DESKTOP_HINTS["screen_display_asleep"]
+        if asleep
+        else "请确认显示器或 HDMI 欺骗器已连接，并目视确认显示器唤醒。"
+        if asleep is None
+        else "",
+    )
     saver = probe.run(["defaults", "-currentHost", "read", "com.apple.screensaver", "idleTime"])
     idle = saver.out.strip() if saver and saver.code == 0 else ""
     saver_fix = "系统设置 → 锁定屏幕 → 「不活跃时启动屏幕保护程序」选「永不」"

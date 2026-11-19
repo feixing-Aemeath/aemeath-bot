@@ -49,8 +49,46 @@ class CardsTest {
         assertTrue(c.first)
         assertFalse(c.tile)
         val s = c.content as CardContent.Stat
+        assertTrue(s.wide)
         assertEquals("alert", s.bar?.tone)
         assertEquals(344.5, s.bar!!.segments[0].y, 0.0)
+    }
+
+    @Test
+    fun overBudgetBarKeepsEveryCategoryInItsShareOfTheTotal() {
+        val bar = StatBar(2000.0, listOf(Point("吃饭", 1800.0), Point("购物", 1200.0)), "alert")
+        assertEquals(listOf(0.6, 0.4), bar.fractions)
+        assertEquals(listOf(0.25, 0.0), StatBar(2000.0, listOf(Point("吃饭", 500.0), Point("退款", -100.0)), null).fractions)
+        assertEquals(listOf(0.0), StatBar(0.0, listOf(Point("空", 0.0)), null).fractions)
+        assertTrue(StatBar(0.0, emptyList(), null).fractions.isEmpty())
+    }
+
+    @Test
+    fun onlyAmountAboveBudgetIsAnExcessBar() {
+        val chart = card(
+            "chart", """{"kind":"bar","points":[{"x":"9月","y":2260,"label":"2,260"}],"target":{"value":2000,"label":"生活费"}}"""
+        ).content as CardContent.Chart
+        assertEquals(BarParts(2000.0, 260.0), chart.barParts(2260.0))
+        assertEquals(BarParts(1500.0, 0.0), chart.barParts(1500.0))
+        assertEquals(BarParts(2000.0, 0.0), chart.barParts(2000.0))
+        assertEquals(BarParts(-50.0, 0.0), chart.barParts(-50.0))
+        assertEquals(BarParts(2260.0, 0.0), chart.copy(target = null).barParts(2260.0))
+        assertEquals(BarParts(2260.0, 0.0), chart.copy(kind = "line").barParts(2260.0))
+        assertEquals(BarParts(2260.0, 0.0), chart.copy(series = chart.series + chart.series).barParts(2260.0))
+    }
+
+    @Test
+    fun donutPointWithoutLabelStillShowsItsValue() {
+        assertEquals("344 元", Point("吃饭", 344.0, "344 元").display)
+        assertEquals("344", Point("吃饭", 344.0).display)
+        assertEquals("344.5", Point("吃饭", 344.5).display)
+    }
+
+    @Test
+    fun tinyDonutSharesDoNotRoundToZero() {
+        assertEquals("<1%", Point("其他", 0.2).share(100.0))
+        assertEquals("25%", Point("吃饭", 25.9).share(100.0))
+        assertEquals("0%", Point("空", 0.0).share(0.0))
     }
 
     @Test
@@ -87,6 +125,16 @@ class CardsTest {
         val list = c.content as CardContent.Items
         assertEquals(.75, list.items[0].progress!!.fraction, 0.0)
         assertNull(list.items[1].state)
+    }
+
+    @Test
+    fun timetableTimesSplitOnlyARealTimeRange() {
+        listOf("08:00–09:35", "08:00 - 09:35", "08:00~09:35").forEach { subtitle ->
+            assertEquals("08:00" to "09:35", ListItem("高数", subtitle).timeRange)
+        }
+        assertNull(ListItem("高数", "第3周–第4周").timeRange)
+        assertNull(ListItem("高数", "第一教学楼").timeRange)
+        assertNull(ListItem("高数").timeRange)
     }
 
     @Test

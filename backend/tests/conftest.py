@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +13,8 @@ from core.documents import FakeExtractor
 from core.models import MessageInput, TodoCreate
 from core.service import Service
 from harness import deepseek
-from plugins.token_usage import limits
+from harness.base import CLIHarness
+from plugins.token_usage import limits, sessions
 from plugins.weather import forecast
 
 
@@ -40,6 +43,38 @@ def windows_symlink_privilege(monkeypatch):
             raise
 
     monkeypatch.setattr(Path, "symlink_to", link)
+
+
+@pytest.fixture(autouse=True)
+def no_real_agent_processes_or_sessions(monkeypatch):
+    available = CLIHarness.available
+    import_sessions = sessions.import_sessions
+
+    def fake_available(self):
+        if self.executable in {"claude", "codex"}:
+            command = shutil.which(self.executable)
+            # evals.mock_cli puts synthetic executables in a fresh temporary directory.
+            return bool(
+                command
+                and Path(command).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+            )
+        return available(self)
+
+    def synthetic_sessions(db, directories, state):
+        directories = [
+            d for d in directories if d not in {"~/.claude/projects", "~/.codex/sessions"}
+        ]
+        return import_sessions(db, directories, state)
+
+    monkeypatch.setattr(CLIHarness, "available", fake_available)
+    monkeypatch.setattr(sessions, "import_sessions", synthetic_sessions)
+
+
+@pytest.fixture(autouse=True)
+def no_deployment_settings(monkeypatch):
+    for name in os.environ:
+        if name.startswith(("ASSISTANT_", "FEISHU_")):
+            monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -75,6 +110,7 @@ def service(tmp_path):
         Settings(
             token="test-token-000000000000000000000000",
             data_dir=tmp_path / "state",
+            vault_dir=tmp_path / "vault",
             scheduler_enabled=False,
             _env_file=None,
         ),

@@ -8,6 +8,7 @@ Ticking it off in the App or in Reminders completes the todo, and with it the ho
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from core.message_signals import redact_todo
 from core.plugins import Plugin as BasePlugin
 from core.store import todo_row
 from plugins.school.common import (
@@ -55,7 +56,8 @@ class Plugin(BasePlugin):
         with self.db.connect() as conn:
             conn.executescript(SCHEMA)
         self.course_chats = set(config.get("course_chats", []))
-        self.keywords = config.get("keywords") or KEYWORDS
+        keywords = config.get("keywords")
+        self.keywords = KEYWORDS if keywords is None else keywords
 
     def now(self):
         return datetime.now(zone_of(self.context))
@@ -66,7 +68,7 @@ class Plugin(BasePlugin):
             row["todo_id"]: row["course"]
             for row in self.db.rows("SELECT todo_id, course FROM homework_marks")
         }
-        rows = self.db.rows("SELECT * FROM todos WHERE status != 'deleted'")
+        rows = self.db.rows("SELECT * FROM todos WHERE status IN ('pending','completed')")
         result = []
         for todo in self.context.store.with_sources([todo_row(row) for row in rows]):
             chats = [source["chat_name"] for source in todo["sources"]]
@@ -105,6 +107,7 @@ class Plugin(BasePlugin):
             "之后一周要交": [],
         }
         for todo in sorted(self.homework(), key=lambda t: (t["due_at"] is None, t["due_at"] or "")):
+            todo = redact_todo(todo, self.context.store.local_identities)
             pending = todo["status"] == "pending"
             if pending and due(todo) == day:
                 sections["今天要交"].append(todo)
@@ -155,9 +158,13 @@ class Plugin(BasePlugin):
             week_start(now.date()) + timedelta(days=7), datetime.min.time(), now.tzinfo
         )
         this_week = [
-            t for t in pending if t["due_at"] and now <= local(t["due_at"], now.tzinfo) < week_end
+            t
+            for t in pending
+            if t["due_at"]
+            and not deadline_passed(t, now)
+            and local(t["due_at"], now.tzinfo) < week_end
         ]
-        overdue = [t for t in pending if t["due_at"] and local(t["due_at"], now.tzinfo) < now]
+        overdue = [t for t in pending if t["due_at"] and deadline_passed(t, now)]
         if not items:
             return [
                 {
@@ -188,30 +195,7 @@ class Plugin(BasePlugin):
                 "data": {"todos": [strip(t) for t in pending[:20]]},
             },
         ]
-        weeks = [week_start(now.date()) - timedelta(weeks=n) for n in (3, 2, 1, 0)]
-        counts = dict.fromkeys(weeks, 0)
-        for todo in items:
-            moment = local(todo["due_at"] or todo["created_at"], now.tzinfo)
-            start = week_start(moment.date())
-            if start in counts:
-                counts[start] += 1
-        cards.append(
-            {
-                "type": "chart",
-                "title": "最近 4 周的作业",
-                "data": {
-                    "kind": "bar",
-                    "unit": "项",
-                    "points": [
-                        {
-                            "x": "本周" if start == weeks[-1] else f"{start.month}/{start.day}",
-                            "y": n,
-                        }
-                        for start, n in counts.items()
-                    ],
-                },
-            }
-        )
+        cards.append(weeks_card(items, now, 4))
         done = sorted(
             (t for t in items if t["status"] == "completed"),
             key=lambda t: t["updated_at"],
@@ -238,6 +222,47 @@ class Plugin(BasePlugin):
             )
         return cards
 
+    def charts(self):
+        """Charts 作业Bot can draw into a chat reply, from the same homework as the cards."""
+        return {
+            "weekly": {
+                "title": "每周的作业数",
+                "description": "柱状图：最近几周每周要交几项作业（按截止日期算，没有截止日期的按布置那天）",
+                "params": {
+                    "weeks": {
+                        "type": "integer",
+                        "minimum": 2,
+                        "maximum": 12,
+                        "default": 8,
+                        "description": "看最近几周（含本周）",
+                    }
+                },
+                "build": self.weeks_chart,
+            },
+            "upcoming": {
+                "title": "接下来要交的作业",
+                "description": "列表：接下来几天要交、还没交的作业，按截止时间排，带课程",
+                "params": {
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 14,
+                        "default": 7,
+                        "description": "看接下来几天（含今天）",
+                    }
+                },
+                "build": self.upcoming_chart,
+            },
+        }
+
+    async def weeks_chart(self, values):
+        now = self.now()
+        return await asyncio.to_thread(lambda: weeks_card(self.homework(), now, values["weeks"]))
+
+    async def upcoming_chart(self, values):
+        now = self.now()
+        return await asyncio.to_thread(lambda: upcoming_card(self.homework(), now, values["days"]))
+
     def mcp_tools(self):
         return {"homework_mark": self.homework_mark, "homework_list": self.homework_list}
 
@@ -261,6 +286,7 @@ class Plugin(BasePlugin):
         arguments_of(arguments, {"status"})
         status = choice(arguments, "status", ("pending", "completed"))
         items = await asyncio.to_thread(self.homework)
+        items = [redact_todo(todo, self.context.store.local_identities) for todo in items]
         items = [t for t in items if status is None or t["status"] == status]
         items.sort(key=lambda t: (t["status"] != "pending", t["due_at"] is None, t["due_at"] or ""))
         return {
@@ -274,6 +300,67 @@ class Plugin(BasePlugin):
         }
 
 
+def weeks_card(items, now, count):
+    """Bars of how many homework items each of the last `count` weeks had due."""
+    weeks = [week_start(now.date()) - timedelta(weeks=n) for n in range(count - 1, -1, -1)]
+    counts = dict.fromkeys(weeks, 0)
+    for todo in items:
+        moment = local(todo["due_at"] or todo["created_at"], now.tzinfo)
+        start = week_start(moment.date())
+        if start in counts:
+            counts[start] += 1
+    return {
+        "type": "chart",
+        "title": f"最近 {count} 周的作业",
+        "data": {
+            "kind": "bar",
+            "unit": "项",
+            "points": [
+                {"x": "本周" if start == weeks[-1] else f"{start.month}/{start.day}", "y": n}
+                for start, n in counts.items()
+            ],
+        },
+    }
+
+
+def upcoming_card(items, now, days):
+    """The pending homework due from now to the end of the `days`-th day, soonest first."""
+    end = datetime.combine(now.date() + timedelta(days=days), datetime.min.time(), now.tzinfo)
+    due = sorted(
+        (
+            t
+            for t in items
+            if t["status"] == "pending"
+            and t["due_at"]
+            and not deadline_passed(t, now)
+            and local(t["due_at"], now.tzinfo) < end
+        ),
+        key=lambda t: t["due_at"],
+    )
+    title = f"接下来 {days} 天要交的作业"
+    if not due:
+        return {"type": "list", "title": title, "data": {"items": ["这几天没有要交的作业"]}}
+    return {
+        "type": "list",
+        "title": title,
+        "data": {
+            "items": [
+                {
+                    "title": t["title"],
+                    **({"subtitle": t["course"]} if t["course"] else {}),
+                    "detail": when_text(t["due_at"], t["has_time"], now),
+                }
+                for t in due
+            ]
+        },
+    }
+
+
 def strip(todo):
     """A Todo as the API returns it, without the plugin's extra `course`."""
     return {key: value for key, value in todo.items() if key != "course"}
+
+
+def deadline_passed(todo, now):
+    at = local(todo["due_at"], now.tzinfo)
+    return at < now if todo["has_time"] else at.date() < now.date()

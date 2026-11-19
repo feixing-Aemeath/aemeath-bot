@@ -10,6 +10,7 @@ from core.daily import keep_notes
 from core.db import uid
 from core.plugins import Plugin as BasePlugin
 from core.prompts import render
+from core.tokens import task_grant
 from plugins.school.common import arguments_of, text, week_start, zone_of
 from plugins.weekly_review.inputs import Inputs
 
@@ -56,6 +57,13 @@ class Plugin(BasePlugin):
         await super().setup(context, config)
         self.review_agent = config.get("review_agent", "deepseek")
         self.review_cron = review_schedule(config.get("review_cron", "0 21 * * 0"))
+        self.lock = asyncio.Lock()
+        self.stopped = False
+
+    async def teardown(self):
+        self.stopped = True
+        async with self.lock:
+            pass
 
     def now(self):
         return datetime.now(zone_of(self.context))
@@ -72,7 +80,7 @@ class Plugin(BasePlugin):
 
     async def review_input(self, arguments):
         """Weekly aggregates and titles only: completed/overdue todos, homework, classes,
-        activities, sleep/readiness, tokens and next week's deadlines/exam titles. Missing or
+        activities, sleep/readiness, extraction accounting and next week's deadlines/exam titles. Missing or
         disabled plugins say 没有数据. No raw chats. arguments: {"date": "YYYY-MM-DD"}
         (optional, any day of the Monday-Sunday week; default today)."""
         arguments_of(arguments, {"date"})
@@ -108,6 +116,13 @@ class Plugin(BasePlugin):
             ),
             incomplete_error="review_not_written",
             harness=self.review_agent,
+            grant=task_grant(
+                "weekly_review:review",
+                plugin_tools={
+                    ("weekly_review", "weekly_review_input"),
+                    ("weekly_review", "weekly_review_write"),
+                },
+            ),
         )
 
     async def review_write(self, arguments):
@@ -121,7 +136,19 @@ class Plugin(BasePlugin):
         # The final notes section belongs to the user/Bot, not generated report text.
         if any(line.rstrip() == "## 笔记" for line in body.splitlines()):
             raise ValueError("text must not contain the notes section")
-        return await asyncio.to_thread(self.write, monday, body, self.now())
+        async with self.lock:
+            if self.stopped:
+                raise RuntimeError("weekly_review_stopped")
+            worker = asyncio.create_task(asyncio.to_thread(self.write, monday, body, self.now()))
+            try:
+                result = await asyncio.shield(worker)
+                goals = self.context.get_plugin("goals") if self.context.get_plugin else None
+                if goals is not None:
+                    await goals.weekly_finished(monday)
+                return result
+            except asyncio.CancelledError:
+                await asyncio.gather(worker, return_exceptions=True)
+                raise
 
     def write(self, monday, body, now):
         week, memory = week_id(monday), self.context.memory

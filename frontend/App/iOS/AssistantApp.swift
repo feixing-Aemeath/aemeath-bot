@@ -4,6 +4,7 @@ import UIKit
 
 @main
 struct AssistantApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store: AppStore
 
     init() {
@@ -15,12 +16,21 @@ struct AssistantApp: App {
             PhoneWatchBridge.shared.attach(store)
             HealthSync.shared.attach(store)
         }
+        PhoneReach.shared.attach(store)
     }
 
     var body: some Scene {
         WindowGroup {
             AdaptiveRootView()
                 .environmentObject(store)
+                .onOpenURL { PhoneReach.shared.open($0) }
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            switch phase {
+            case .active: store.start()
+            case .background: store.stop()
+            default: break
+            }
         }
     }
 }

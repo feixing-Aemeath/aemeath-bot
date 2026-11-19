@@ -17,6 +17,7 @@ overridden per machine in the plugin config after calibrating on the Mac.
 import re
 import unicodedata
 from dataclasses import dataclass, field, fields, replace
+from functools import cached_property
 
 from plugins.screen.model import TextBlock
 from plugins.screen.timeparse import is_time_label, parse_separator
@@ -47,7 +48,15 @@ class ChatLayout:
     center_tolerance: float = 0.12  # |line center - 0.5| for time separators and notices
     name_height_ratio: float = 0.85  # names are shorter than this × body text height
     name_indent: float = 0.006  # names start within this of the leftmost; card rows sit further in
+    # A name sits right above the bubble it labels: the bubble's first line starts this much
+    # further right (its padding) and this many body heights below. Bubble to bubble is wider.
+    name_setin_min: float = 0.005
+    name_setin_max: float = 0.06
+    name_gap_min: float = 0.4
+    name_gap_max: float = 1.1
     bubble_gap: float = 0.8  # a vertical gap above this × body height starts a new bubble
+    # The helper scrolls a chat by this fraction of its area between screenshots (ChatReader).
+    scroll_fraction: float = 0.65
     row_overlap: float = 0.5  # blocks overlapping this much vertically form one line
     edge_margin: float = 0.004  # blocks this close to the top/bottom edge are cut off
     space_gap: float = 0.6  # horizontal gap (× height) between blocks that becomes a space
@@ -85,11 +94,16 @@ class Line:
     def height(self):
         return self.bottom - self.top
 
-    @property
+    @cached_property
     def key(self):
         # Side only: whether a left line is a name is decided on the whole stitched timeline,
         # so one screenshot's statistics can never make the same line look different.
-        return (self.kind, normalize(self.text))
+        # QQ adds the send time beside the name under the pointer, and the pointer stays where
+        # the last scroll left it: the same name line has it on one screen and not the next.
+        if self.kind == "time" and self.when is not None:
+            return (self.kind, self.when.isoformat())
+        text = HOVER_TIME.sub("", self.text) if self.kind in {"left", "right"} else self.text
+        return (self.kind, normalize(text))
 
 
 def normalize(text):

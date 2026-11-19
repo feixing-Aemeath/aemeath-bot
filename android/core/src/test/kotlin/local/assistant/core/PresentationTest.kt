@@ -6,6 +6,17 @@ import org.junit.Test
 
 class PresentationTest {
     @Test
+    fun backendStatusAndWindowsErrorsDoNotAssumeAMacHost() {
+        assertEquals("后端在线，空闲中", MascotState.IDLE.headline)
+        assertEquals("连不上后端", MascotState.OFFLINE.headline)
+        assertEquals("需要 Mac 后端同步提醒事项和日历", RunText.error("macos_required"))
+        assertEquals("后端电脑已锁屏", RunText.error("screen_locked"))
+        assertEquals("未安装简体中文 OCR", RunText.error("screen_ocr_language_missing"))
+        assertEquals("窗口状态变化，已停止读屏", RunText.error("screen_input_refused"))
+        assertEquals("截图助手超时", RunText.error("screen_helper_timeout"))
+    }
+
+    @Test
     fun dueDatesDistinguishDateOnlyAndTimedDeadlines() {
         val t = testTodo().copy(dueAt = "2026-10-15T00:00:00+08:00")
         assertEquals("今天", DueText.describe(t, testNow, testZone))
@@ -173,6 +184,7 @@ class PresentationTest {
             testTodo(),
             testTodo("2", "feishu,qq_screen"),
             testTodo("3").copy(status = "deleted"),
+            testTodo("cancelled").copy(status = "cancelled"),
             testTodo("4", created = testNow.minusSeconds(3600).toString()),
             testTodo("5", "feishu")
         )

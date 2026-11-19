@@ -15,6 +15,52 @@ import okhttp3.mockwebserver.MockWebServer
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AppStoreTest {
+    @Test
+    fun hiddenWindowDoesNotMarkNewRepliesSeen() = runTest {
+        val store = store(this)
+        store.device.markSeen("assistant", at = 1L)
+        val seen = store.device.seen("assistant")
+        store.markSeen("assistant", visible = false)
+        assertEquals(seen, store.device.seen("assistant"))
+        store.markSeen("assistant", visible = true)
+        assertTrue(store.device.seen("assistant") > seen)
+        store.markSeen("fresh-bot", visible = false)
+        assertEquals(store.device.firstLaunch, store.device.seen("fresh-bot"))
+        store.markSeen("fresh-bot", visible = true)
+        assertTrue(store.device.seen("fresh-bot") >= store.device.firstLaunch)
+    }
+
+    @Test
+    fun refreshIncludesTodoAfterTwoHundredCompletedItems() = runTest {
+        val mock = MockBackend()
+        val todos = (0..200).map { Todo("t$it", "待办$it", status = if (it < 200) "completed" else "pending") }
+        val api = object : Backend() {
+            override suspend fun raw(method: String, path: List<String>, query: Map<String, String>, body: ByteArray?, contentType: String): ByteArray {
+                if (path == listOf("todos")) {
+                    val offset = query.getValue("offset").toInt()
+                    return Wire.encodeToJsonElement(Page(todos.drop(offset).take(200), todos.size)).toString().toByteArray()
+                }
+                return mock.raw(method, path, query, body, contentType)
+            }
+        }
+        val store = store(this, api)
+        store.refresh()
+        assertTrue(store.state.value.online)
+        assertEquals("t200", store.state.value.todos.last().id)
+    }
+
+    @Test
+    fun cancelledTodoDisappearsImmediatelyAndAfterRefresh() = runTest {
+        val store = store(this)
+        store.refresh()
+        val todo = store.state.value.today!!.todos.first()
+        assertTrue(store.updateTodo(todo, buildJsonObject { put("status", "cancelled") }))
+        assertFalse(store.state.value.todos.any { it.id == todo.id })
+        assertFalse(store.state.value.today!!.todos.any { it.id == todo.id })
+        store.refresh()
+        assertFalse(store.state.value.todos.any { it.id == todo.id })
+    }
+
     @get:Rule
     val temporary = TemporaryFolder()
 

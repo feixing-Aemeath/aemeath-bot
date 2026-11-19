@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 
 from core.plugins import Plugin as BasePlugin
 from core.prompts import render
+from core.tokens import task_grant
 from plugins.school.common import arguments_of, text, zone_of
 from plugins.weather import forecast
 
@@ -72,6 +73,10 @@ class Plugin(BasePlugin):
             data = await asyncio.to_thread(
                 forecast.fetch, *self.coordinates, self.context.store.settings.timezone
             )
+            today = now.date()
+            if today in self.days() and today not in {day.date for day in forecast.days(data)}:
+                raise forecast.WeatherError("weather_bad_answer")  # keep the good one we have
+            forecast.days(data)
         except forecast.WeatherError as error:
             code = str(error)
             self.context.put(FORECAST, {**stored, "error": code, "checked_at": now.isoformat()})
@@ -82,7 +87,10 @@ class Plugin(BasePlugin):
 
     def days(self):
         data = self.context.get(FORECAST, {}).get("data")
-        return {day.date: day for day in forecast.days(data)} if data else {}
+        try:
+            return {day.date: day for day in forecast.days(data)} if data else {}
+        except forecast.WeatherError:
+            return {}  # cached answers from an older version may be incomplete too
 
     # Morning reminder ---------------------------------------------------------------------
 
@@ -111,6 +119,15 @@ class Plugin(BasePlugin):
             succeeded=lambda: today.isoformat() in self.briefs(),
             incomplete_error="brief_not_written",
             harness=self.brief_agent,
+            grant=task_grant(
+                "weather:brief",
+                tools={"memory_read"},
+                plugin_tools={("weather", "weather_forecast"), ("weather", "weather_brief_write")},
+                memory_read_paths={
+                    f"每日/{today}/{file}.md"
+                    for file in ("今天", "课程", "待办", "作业", "活动与请假")
+                },
+            ),
         )
 
     async def brief_write(self, arguments):

@@ -1,10 +1,69 @@
 package local.assistant.core
 
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.*
+import kotlinx.coroutines.test.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class BotsTest {
+    @Test
+    fun newDraftSurvivesDelayedSendSuccessAndFailure() = runTest {
+        for (success in listOf(true, false)) {
+            var draft = "第一句"
+            val started = CompletableDeferred<String>()
+            val result = CompletableDeferred<Boolean>()
+            val sending = launch {
+                sendDraft(draft, { draft }, { draft = "" }) {
+                    started.complete(it)
+                    result.await()
+                }
+            }
+            assertEquals("第一句", started.await())
+            draft = "下一句草稿"
+            result.complete(success)
+            sending.join()
+            assertEquals("下一句草稿", draft)
+        }
+    }
+
+    @Test
+    fun successfulSendClearsOnlyTheSubmittedDraftAndFailureKeepsIt() = runTest {
+        var draft = "第一句"
+        sendDraft(draft, { draft }, { draft = "" }) { false }
+        assertEquals("第一句", draft)
+        sendDraft(draft, { draft }, { draft = "" }) { true }
+        assertEquals("", draft)
+    }
+
+    @Test
+    fun cancelledSendKeepsDraftAndPropagatesCancellation() = runTest {
+        var draft = "第一句"
+        try {
+            sendDraft(draft, { draft }, { draft = "" }) { throw CancellationException() }
+            fail("Cancellation must propagate")
+        } catch (_: CancellationException) {}
+        assertEquals("第一句", draft)
+    }
+
+    @Test
+    fun oldChatSnapshotsCannotEraseMessagesOrRegressReadyReplies() {
+        val me = ChatMessage("m", "assistant", "me", "第一句", "ready", createdAt = testNow.toString(), updatedAt = testNow.toString())
+        val pending = me.copy(id = "r", author = "bot", text = "", status = "pending")
+        val ready = pending.copy(text = "回复", status = "ready", updatedAt = testNow.plusSeconds(1).toString())
+        val existing = listOf(me, ready)
+        assertEquals(existing, BotTimeline.mergeChat(existing, emptyList()))
+        assertEquals(existing, BotTimeline.mergeChat(existing, listOf(pending, me)))
+        assertEquals(existing, BotTimeline.mergeChat(existing, listOf(ready.copy(status = "pending"))))
+        assertEquals(listOf(me, pending), BotTimeline.mergeChat(emptyList(), listOf(pending, me)))
+    }
+
+    @Test
+    fun aHiddenPasswordReplacesTheCachedText() {
+        val cached = ChatMessage("m", "assistant", "me", "密码是合成密码", "ready", createdAt = testNow.toString(), updatedAt = testNow.toString())
+        val hidden = cached.copy(text = "密码是（密码已隐藏）")
+        assertEquals(listOf(hidden), BotTimeline.mergeChat(listOf(cached), listOf(hidden)))
+    }
+
     private val catalog = StickerCatalog(
         setOf("aemeath", "orange_daisy", "moning"),
         mapOf("assistant" to PluginMascot("aemeath"), "knowledge" to PluginMascot("orange_daisy")),
@@ -105,7 +164,7 @@ class BotsTest {
             bot(),
             null,
             ds,
-            listOf(testTodo(plugin = "homework")),
+            listOf(testTodo(plugin = "homework"), testTodo("cancelled", "homework").copy(status = "cancelled")),
             emptyList(),
             emptyList(),
             emptyList(),
@@ -173,8 +232,68 @@ class BotsTest {
             testZone
         )
         assertEquals(2, messages.size)
-        assertTrue(messages[0].text.contains("提炼完一次待办"))
+        assertEquals("今天提炼了 1 次待办，最近一次 20:50 · Claude Code", messages[0].text)
         assertEquals("今天的总结", messages[1].title)
+    }
+
+    @Test
+    fun successfulExtractionsCollapseByFinishTimeAndKeepProblemsVisible() {
+        val b = Bot.build(emptyList(), catalog).first()
+        val latest = testRun(ago = 3600, seconds = 3500).copy(id = "latest", harness = "codex")
+        val runs = listOf(
+            latest,
+            testRun(ago = 90000).copy(id = "yesterday"),
+            testRun(job = "backup").copy(id = "backup"),
+            testRun(ago = 600).copy(id = "other"),
+            testRun(status = "failed", ago = 90, error = "quota_exhausted").copy(id = "failed", attempt = 2),
+            testRun(status = "cancelled", ago = 60).copy(id = "cancelled"),
+            testRun(status = "running", ago = 10, seconds = null).copy(id = "running")
+        )
+        val messages = BotTimeline.messages(
+            b, null, emptyList(), emptyList(), runs, emptyList(), emptyList(), testNow, testZone
+        )
+        assertEquals(listOf("runs-2026-10-15", "run-failed", "run-cancelled", "run-running"), messages.map { it.id })
+        assertEquals("今天提炼了 2 次待办，最近一次 20:58 · Codex", messages[0].text)
+        assertEquals(instant(latest.finishedAt!!), messages[0].at)
+        assertEquals("提炼待办失败：额度用完 · Claude Code（第 2 次）", messages[1].text)
+        assertTrue(messages[1].failed)
+        assertTrue(messages[2].text.startsWith("提炼待办被取消了"))
+        assertTrue(messages[3].text.startsWith("正在提炼待办"))
+    }
+
+    @Test
+    fun failedExtractionsDoNotProduceASuccessSummary() {
+        val messages = BotTimeline.messages(
+            Bot.build(emptyList(), catalog).first(), null, emptyList(), emptyList(),
+            listOf(testRun(status = "failed")), emptyList(), emptyList(), testNow, testZone
+        )
+        assertEquals(1, messages.size)
+        assertTrue(messages.single().failed)
+    }
+
+    @Test
+    fun extractionDayUsesLocalStartDateAndMissingFinishFallsBackToStart() {
+        val runs = listOf(
+            Run("today", "extract_todos", "codex", "2026-10-15T00:10:00+08:00", null, "succeeded"),
+            Run("yesterday", "extract_todos", "claude_code", "2026-10-14T23:50:00+08:00", "2026-10-15T00:05:00+08:00", "succeeded")
+        )
+        val messages = BotTimeline.messages(
+            Bot.build(emptyList(), catalog).first(), null, emptyList(), emptyList(),
+            runs, emptyList(), emptyList(), testNow, testZone
+        )
+        assertEquals("今天提炼了 1 次待办，最近一次 00:10 · Codex", messages.single().text)
+        assertEquals(instant(runs[0].startedAt), messages.single().at)
+    }
+
+    @Test
+    fun digestSectionsKeepBlankLinesBeforeBoldHeadings() {
+        val messages = BotTimeline.messages(
+            bot(), null,
+            listOf(Digest("d", "2026-10-15", "homework", "**新待办**\n- 交作业\n\n**通知**\n- 周一排球课", testNow.toString())),
+            emptyList(), emptyList(), emptyList(), emptyList(), testNow, testZone
+        )
+        assertEquals("**新待办**\n- 交作业\n\n**通知**\n- 周一排球课", messages.single().text)
+        assertEquals("一行\n两行", BotTimeline.spaced(listOf("一行", "两行")))
     }
 
     @Test
@@ -209,31 +328,53 @@ class BotsTest {
         )
         assertEquals(listOf("me", "bot", "app"), messages.map { it.author })
         assertTrue(messages.last().text.contains("后端重启"))
+        assertFalse(messages.last().text.contains("Mac"))
         assertTrue(messages.last().failed)
     }
 
     @Test
-    fun chatStartsWithLastTwoDaysThatActuallyHaveMessages() {
+    fun chatStartsWithTodayAndRevealsOneMessageDayPerTap() {
         val messages = listOf(
-            0L,
-            2L,
-            5L,
-            5L,
-            7L
+            "2026-10-24T08:00:00+08:00", "2026-10-25T08:00:00+08:00",
+            "2026-10-27T23:50:00+08:00", "2026-10-28T00:10:00+08:00", "2026-10-28T09:00:00+08:00"
+        ).mapIndexed { i, at -> BotMessage("$i", "bot", instant(at), "文字") }
+        val now = instant("2026-10-28T12:00:00+08:00")
+        val (opened, hidden) = BotTimeline.recent(messages, 0, now, testZone)
+        assertEquals(listOf("3", "4"), opened.map { it.id })
+        assertEquals(listOf("2026-10-27", "2026-10-25", "2026-10-24"), hidden.map { it.toString() })
+        assertEquals("看昨天的消息（更早还有 2 天）", BotTimeline.earlierLabel(hidden, now, testZone))
+        val (once, remaining) = BotTimeline.recent(messages, 1, now, testZone)
+        assertEquals(listOf("2", "3", "4"), once.map { it.id })
+        assertEquals("看10月25日的消息（更早还有 1 天）", BotTimeline.earlierLabel(remaining, now, testZone))
+        val all = BotTimeline.recent(messages, 9, now, testZone)
+        assertEquals(messages, all.first)
+        assertTrue(all.second.isEmpty())
+        assertNull(BotTimeline.earlierLabel(all.second, now, testZone))
+        assertEquals(opened, BotTimeline.recent(messages, -1, now, testZone).first)
+    }
+
+    @Test
+    fun noMessagesTodayDoesNotAutomaticallyRevealYesterday() {
+        val messages = listOf(BotMessage("yesterday", "bot", instant("2026-10-28T23:59:00+08:00"), "旧消息"))
+        val now = instant("2026-10-29T00:01:00+08:00")
+        val (visible, hidden) = BotTimeline.recent(messages, 0, now, testZone)
+        assertTrue(visible.isEmpty())
+        assertEquals("看昨天的消息", BotTimeline.earlierLabel(hidden, now, testZone))
+        assertEquals(messages, BotTimeline.recent(messages, 1, now, testZone).first)
+        assertEquals(emptyList<BotMessage>() to emptyList<java.time.LocalDate>(), BotTimeline.recent(emptyList(), 0, now, testZone))
+    }
+
+    @Test
+    fun recentUsesCalendarDaysAcrossDaylightSavingAndKeepsFutureMessages() {
+        val zone = java.time.ZoneId.of("America/New_York")
+        val now = instant("2026-11-01T12:00:00-05:00")
+        val messages = listOf(
+            BotMessage("yesterday", "bot", instant("2026-10-31T23:59:00-04:00"), "旧"),
+            BotMessage("first-hour", "me", instant("2026-11-01T01:15:00-04:00"), "我"),
+            BotMessage("second-hour", "bot", instant("2026-11-01T01:15:00-05:00"), "回复"),
+            BotMessage("future", "bot", instant("2026-11-02T00:01:00-05:00"), "以后")
         )
-            .mapIndexed { i, day ->
-                BotMessage(
-                    "$i",
-                    "bot",
-                    testNow.minusSeconds(day * 86400),
-                    "文字"
-                )
-            }
-            .sortedBy { it.at }
-        val(visible, older) = BotTimeline.recent(messages, 2, testZone)
-        assertEquals(2, visible.size)
-        assertEquals(2, older)
-        assertEquals(messages, BotTimeline.recent(messages, 0, testZone).first)
+        assertEquals(listOf("first-hour", "second-hour", "future"), BotTimeline.recent(messages, 0, now, zone).first.map { it.id })
     }
 
     @Test

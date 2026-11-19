@@ -18,23 +18,18 @@ public struct TodoRow: View {
     public var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: todo.status == .completed ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(todo.status == .completed ? Color.green : Color.secondary)
+                .foregroundStyle(todo.status == .completed ? Color.green : overdue ? Color.red.opacity(0.75) : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(todo.title)
-                    .font(compact ? .footnote : .body)
+                    .font(compact ? CardFont.note : CardFont.body.weight(.medium))
                     .strikethrough(todo.status == .completed)
                     .lineLimit(compact ? 2 : 3)
-                Text(DueText.describe(todo))
-                    .font(.caption2)
+                Text(compact ? DueText.describe(todo) : DueText.describe(todo) + " · " + SourceLabel.text(todo.sourcePlugin))
+                    .font(compact ? .caption2 : CardFont.note)
                     .foregroundStyle(overdue ? Color.red : Color.secondary)
-                if !compact {
-                    Text(SourceLabel.text(todo.sourcePlugin))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
             }
         }
-        .padding(.vertical, compact ? 0 : 2)
+        .padding(.vertical, compact ? 0 : 3)
     }
 }
 

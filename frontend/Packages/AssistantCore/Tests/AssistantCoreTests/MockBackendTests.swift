@@ -190,7 +190,9 @@ final class MockBackendTests: XCTestCase {
         XCTAssertEqual(sections.first?.plugin, "qq_screen")
         let today = try XCTUnwrap(sections.first?.days.first)
         XCTAssertEqual(today.date, "2026-10-15")
-        XCTAssertEqual(today.notes.count, 3)
+        // Three sections with their items, as the extraction writes them.
+        XCTAssertEqual(today.notes.count, 7)
+        XCTAssertEqual(today.notes.first, "**新待办**")
         XCTAssertFalse(today.reads.isEmpty)
         XCTAssertFalse(today.todos.isEmpty)
     }

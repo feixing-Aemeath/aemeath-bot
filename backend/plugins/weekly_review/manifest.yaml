@@ -2,7 +2,7 @@ id: weekly_review
 name: 本周回顾
 version: 0.1.0
 icon: calendar
-description: 汇总这一周的待办、作业、课程、活动、健康和 Token，由助理写回顾与下周提醒
+description: 汇总这一周的待办、作业、课程、活动、健康和消息对账，由助理写回顾与下周提醒
 platforms: [any]
 permissions: []
 schedule: null

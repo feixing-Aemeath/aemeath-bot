@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.*
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
@@ -115,6 +116,7 @@ fun ServerCard(
                         Modifier
                             .fillMaxWidth()
                             .height(7.dp)
+                            .clip(CircleShape)
                     ) {
                         drawRoundRect(
                             if (bar.tone == "alert") Color.Red.copy(alpha = .2f) else if (bar.tone == "warn") Color(
@@ -123,11 +125,8 @@ fun ServerCard(
                             cornerRadius = CornerRadius(4.dp.toPx())
                         )
                         var x = 0f
-                        bar.segments.forEachIndexed { i, s ->
-                            val w =
-                                if (bar.max > 0) (s.y.coerceAtLeast(0.0) / bar.max * size.width).toFloat().coerceAtMost(
-                                    size.width - x
-                                ) else 0f
+                        bar.fractions.forEachIndexed { i, fraction ->
+                            val w = (fraction * size.width).toFloat().coerceAtMost((size.width - x).coerceAtLeast(0f))
                             if (w > 0) drawRect(colors[i % colors.size], Offset(x, 0f), Size(w, size.height))
                             x += w
                         }
@@ -193,7 +192,7 @@ fun ServerCard(
                         repeat(3 - photos.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
-            is CardContent.Todos -> c.todos.forEach {
+            is CardContent.Todos -> c.todos.filter { it.visible }.forEach {
                 TodoRow(
                     it,
                     { onTodo(it) },
@@ -260,7 +259,7 @@ private fun RingItem(item: ListItem, modifier: Modifier) {
 @Composable
 private fun TimelineItem(item: ListItem, last: Boolean) {
     val tint = LocalAccent.current
-    val times = item.subtitle?.split(Regex("[–~-]"))?.takeIf { it.size == 2 && it.all { t -> t.trim().length == 5 } }
+    val times = item.timeRange
     Row(
         Modifier
             .fillMaxWidth()
@@ -268,8 +267,8 @@ private fun TimelineItem(item: ListItem, last: Boolean) {
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Column(Modifier.width(46.dp), horizontalAlignment = Alignment.End) {
-            Text(times?.get(0).orEmpty(), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Muted(times?.get(1).orEmpty())
+            Text(times?.first.orEmpty(), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Muted(times?.second.orEmpty())
         }
         Canvas(
             Modifier
@@ -401,7 +400,7 @@ private fun ChartView(chart: CardContent.Chart) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 points.forEachIndexed { i, p ->
                     Text(
-                        "● ${p.x}  ${p.label.orEmpty()}  ${if(total>0) (p.y/total*100).roundToInt() else 0}%",
+                        "● ${p.x}  ${p.display}  ${p.share(total)}",
                         fontSize = 12.sp,
                         color = colors[i % colors.size]
                     )
@@ -465,12 +464,15 @@ private fun ChartView(chart: CardContent.Chart) {
                         val height = ((p?.y?.coerceAtLeast(0.0) ?: 0.0) / maximum * h).toFloat()
                         y -= height
                         drawRect(
-                            if (chart.series.size == 1 && target != null && (p?.y ?: 0.0) > target.value)
-                                Color(0xFFDD9751)
-                            else
-                                colors[i % colors.size],
+                            colors[i % colors.size],
                             Offset(index * step + step * .2f, y),
                             Size(step * .6f, height)
+                        )
+                        val excess = chart.barParts(p?.y ?: 0.0).excess
+                        if (excess > 0) drawRect(
+                            Color(0xFFDD9751),
+                            Offset(index * step + step * .2f, y),
+                            Size(step * .6f, (excess / maximum * h).toFloat())
                         )
                     }
                     if (chart.series.size == 1) chart.series[0].points.find { it.x == x }
@@ -504,6 +506,9 @@ private fun ChartView(chart: CardContent.Chart) {
             }
         }
         chart.target?.label?.let { Muted("┄ $it") }
+        if (chart.kind == "bar" && chart.series.size == 1 && points.any { chart.barParts(it.y).excess > 0 }) {
+            Text("● 超出的部分", fontSize = 11.sp, color = Color(0xFFDD9751))
+        }
         if (chart.series.size > 1) Text(
             chart.series.mapIndexed { i, s -> "● ${s.name}" }.joinToString("  "),
             fontSize = 11.sp,

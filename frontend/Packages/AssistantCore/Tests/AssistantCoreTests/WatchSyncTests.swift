@@ -12,6 +12,17 @@ final class WatchSyncTests: XCTestCase {
             now: now, calendar: calendar)
     }
 
+    func testInvalidCourseTimeDoesNotHideNextClass() {
+        typealias Course = WatchSnapshot.Courses.Course
+        let next = Course(title: "下一节", time: "13:00–14:30")
+        for time in ["待定", "08:99–10:00", "14:30–13:00", "999999999999999999:00–10:00"] {
+            let invalid = Course(title: "时间有误", time: time)
+            XCTAssertNil(invalid.minutes)
+            let day = WatchSnapshot.Courses(title: "今天的课", items: [invalid, next], mascot: nil)
+            XCTAssertEqual(day.current(atMinute: 8 * 60), 1)
+        }
+    }
+
     func testSnapshotFromToday() {
         let snapshot = snapshot()
         XCTAssertEqual(snapshot.todos.count, 3)
@@ -22,6 +33,23 @@ final class WatchSyncTests: XCTestCase {
         let empty = WatchSnapshot.make(today: nil, online: false, state: .offline, now: now, calendar: calendar)
         XCTAssertEqual(empty.remaining, 0)
         XCTAssertEqual(empty.state, .offline)
+    }
+
+    func testOfflineSnapshotKeepsTheCachedDayAcrossMidnight() throws {
+        let cachedAt = APIDateCoding.date(from: "2026-11-05T09:00:00+08:00")!
+        let nextMorning = APIDateCoding.date(from: "2026-11-06T07:00:00+08:00")!
+        var today = MockData.today(now: cachedAt, calendar: calendar)
+        today.cards += [
+            Card(type: .list, title: "今天的课", data: .object([
+                "items": .array([.object(["title": .string("周四课"), "subtitle": .string("08:00–09:35")])])])),
+            Card(type: .list, title: "明天的课", data: .object([
+                "items": .array([.object(["title": .string("周五课"), "subtitle": .string("08:00–09:35")])])])),
+        ]
+        let snapshot = WatchSnapshot.make(
+            today: today, online: false, state: .offline, now: nextMorning, calendar: calendar)
+        XCTAssertTrue(calendar.isDate(snapshot.generatedAt, inSameDayAs: cachedAt))
+        XCTAssertEqual(snapshot.coursePage(at: nextMorning, calendar: calendar)?.courses.items.first?.title, "周五课")
+        XCTAssertFalse(snapshot.online)
     }
 
     func testCoursesAndHealthFromTheCardsOfToday() throws {
@@ -186,6 +214,80 @@ final class WatchSyncTests: XCTestCase {
         XCTAssertNil(weather.shown(at: at("17T07:00"), since: generated, calendar: calendar))
     }
 
+    func testTheSnapshotCarriesDeadlines() throws {
+        let snapshot = snapshot()
+        let timed = try XCTUnwrap(snapshot.todos.first { $0.hasTime == true })
+        XCTAssertNotNil(timed.dueAt)
+        // A snapshot from before deadlines travelled still decodes, and goes by what it says.
+        var old = try JSONSerialization.jsonObject(with: JSONEncoder.assistant().encode(snapshot)) as! [String: Any]
+        old["todos"] = (old["todos"] as! [[String: Any]]).map {
+            var item = $0
+            item["dueAt"] = nil
+            item["hasTime"] = nil
+            return item
+        }
+        let decoded = try JSONDecoder.assistant().decode(
+            WatchSnapshot.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertEqual(decoded.todos.count, snapshot.todos.count)
+        XCTAssertNil(decoded.todos[0].dueAt)
+    }
+
+    func testOwnEventsAreKnownFromTheCard() throws {
+        var today = MockData.today(now: now, calendar: calendar)
+        today.cards.append(
+            Card(
+                type: .list, title: "今天的课",
+                data: .object([
+                    "items": .array([
+                        .object([
+                            "title": .string("社团例会"), "subtitle": .string("19:00–20:00"), "detail": .string("自己的日程"),
+                        ]),
+                        .object(["title": .string("高等数学"), "subtitle": .string("21:00–22:00")]),
+                    ])
+                ])))
+        let courses = try XCTUnwrap(
+            WatchSnapshot.make(today: today, online: true, state: .idle, now: now, calendar: calendar).courses)
+        XCTAssertTrue(courses.items[0].isOwnEvent)
+        XCTAssertFalse(courses.items[1].isOwnEvent)
+    }
+
+    func testMoneyStaysOffTheWatch() {
+        var today = MockData.today(now: now, calendar: calendar)
+        // Shaped like a forecast and like a health card, so only the plugin tells them apart.
+        today.cards += [
+            Card(
+                type: .stat, title: "本月今天", data: .object(["value": .string("9,999"), "symbol": .string("gift.fill")]),
+                plugin: "finance"),
+            Card(type: .stat, title: "今日准备度", data: .object(["value": .string("9,999")]), plugin: "finance"),
+        ]
+        let snapshot = WatchSnapshot.make(today: today, online: true, state: .idle, now: now, calendar: calendar)
+        XCTAssertNil(snapshot.weather)
+        XCTAssertNil(snapshot.health)
+        let encoded = String(data: (try? JSONEncoder.assistant().encode(snapshot)) ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertFalse(encoded.contains("9,999"))
+    }
+
+    func testTheSnapshotStaysSmall() throws {
+        // A heavy day: far from WatchConnectivity's limit for an application context (65 kB).
+        var today = MockData.today(now: now, calendar: calendar)
+        let items: [JSONValue] = (0..<10).map {
+            .object(["title": .string("课程名称比较长的一门课（\($0)）"), "subtitle": .string("08:00–09:35")])
+        }
+        today.cards.append(Card(type: .list, title: "今天的课", data: .object(["items": .array(items)])))
+        today.cards.append(Card(type: .list, title: "明天的课", data: .object(["items": .array(items)])))
+        today.todos = Array(repeating: today.todos, count: 8).flatMap { $0 }
+        let snapshot = WatchSnapshot.make(today: today, online: true, state: .idle, now: now, calendar: calendar)
+        let size = try JSONEncoder.assistant().encode(snapshot).count
+        XCTAssertLessThan(size, 20_000, "the snapshot is \(size) bytes")
+    }
+
+    func testSavedForTheComplications() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "test-\(UUID().uuidString)"))
+        XCTAssertNil(WatchSnapshot.load(from: defaults))
+        snapshot().save(to: defaults)
+        XCTAssertEqual(WatchSnapshot.load(from: defaults), snapshot())
+    }
+
     func testTickingOffBeforeTheIPhoneConfirms() {
         let snapshot = snapshot()
         let first = snapshot.todos[0].id
@@ -195,6 +297,34 @@ final class WatchSyncTests: XCTestCase {
         XCTAssertFalse(ticked.todos[0].overdue)
         XCTAssertEqual(ticked.setting(first, done: false).remaining, 3)
         XCTAssertEqual(snapshot.setting("unknown", done: true), snapshot)
+    }
+
+    func testTickedOnesStayOnTheListWhenTheIPhoneConfirms() {
+        let before = snapshot().setting(snapshot().todos[0].id, done: true)
+        var confirmed = snapshot()
+        confirmed.todos.removeFirst()  // the iPhone's list only has what is left
+        let merged = confirmed.keepingDone(from: before, calendar: calendar)
+        XCTAssertEqual(merged.todos.count, 3)
+        XCTAssertEqual(merged.remaining, 2)
+        XCTAssertTrue(merged.todos.contains { $0.id == before.todos[0].id && $0.done })
+        // Not on a new day, and not over what the iPhone itself says about it.
+        confirmed.generatedAt = calendar.date(byAdding: .day, value: 1, to: confirmed.generatedAt)!
+        XCTAssertEqual(confirmed.keepingDone(from: before, calendar: calendar).todos.count, 2)
+        XCTAssertEqual(snapshot().keepingDone(from: before, calendar: calendar).remaining, 3)
+    }
+
+    @MainActor
+    func testATickTheMacHasNotAcceptedStaysListed() async throws {
+        let name = "watch-completions-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let completions = WatchCompletions(defaults: defaults)
+        completions.enqueue(id: "a", done: true)
+        await completions.retry { _, _ in throw URLError(.notConnectedToInternet) }
+        XCTAssertEqual(completions.pending.map(\.id), ["a"])
+        XCTAssertEqual(completions.pending.map(\.done), [true])
+        await completions.retry { _, _ in }
+        XCTAssertTrue(completions.pending.isEmpty)
     }
 
     func testSnapshotTravelsAsMessage() throws {

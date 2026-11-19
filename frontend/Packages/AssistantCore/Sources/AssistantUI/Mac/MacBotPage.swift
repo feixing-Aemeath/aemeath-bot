@@ -2,59 +2,45 @@
     import AssistantCore
     import SwiftUI
 
-    /// One Bot: its character on top, then its cards, a wavy line, then what it said like a
-    /// chat, and a box at the bottom to write to it (message sources only read, so they have
-    /// none). Scrolling up moves the cards away so the chat gets the whole window; the grip
-    /// above the line folds them, and they fold by themselves once scrolled out of the window
-    /// or on a hard flick down (CardsFold).
+    /// One Bot: its character on top, a wavy line, then what it said like a chat, and a box at
+    /// the bottom to write to it (message sources only read, so they have none). The page opens
+    /// at the newest line. Its cards are in a column on the right (the toolbar's 卡片 shows or
+    /// hides it, remembered on this Mac); all the Bots' cards together are on 仪表盘.
     struct MacBotPage: View {
         @EnvironmentObject private var store: AppStore
         let bot: Bot
-        @State private var cardsShown = true
-        @State private var scroll = PageScroll()
+        @Binding var cardsShown: Bool
         @State private var draft = ""
         @State private var showingInfo = false
         @State private var showingRuns = false
         /// What the character in the header acts out: hello when the page opens, nodding when
         /// the Bot says something.
         @State private var cue: MascotCue?
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         static let bottom = "bottom"
-        static let space = "page"
         static let spacing: CGFloat = 14
+        /// The chat and its box: a reading column, as in Claude's and ChatGPT's apps.
+        static let chatWidth: CGFloat = 760
 
         var plugin: PluginView? { store.plugin(bot.id) }
-
-        var cardCount: Int { BotCards.count(of: bot, in: store) }
 
         var body: some View {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: Self.spacing) {
+                    VStack(alignment: .center, spacing: Self.spacing) {
                         BotHero(bot: bot, status: store.statusLine(bot), cue: cue)
-                        if cardsShown {
-                            VStack(alignment: .leading, spacing: Self.spacing) {
-                                BotCards(bot: bot)
-                            }
-                            .reportGeometry { PageGeometry(cardsHeight: $0.size.height) }
-                        }
-                        CardsHandle(shown: $cardsShown, count: cardCount)
-                            .reportGeometry { PageGeometry(cardsEnd: $0.frame(in: .named(Self.space)).minY) }
+                        OfflineBanner()
+                        if bot.isAssistant { AgentBanner() }
                         WavyDivider(tint: bot.accent)
                         ChatTimeline(bot: bot)
                         Color.clear.frame(height: 1).id(Self.bottom)
                     }
+                    .frame(maxWidth: Self.chatWidth)
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
-                    .reportGeometry { PageGeometry(top: $0.frame(in: .named(Self.space)).minY) }
-                    .background(ScrollViewFinder { scroll.view = $0 })
                 }
-                .coordinateSpace(name: Self.space)
-                .onPreferenceChange(PageGeometryKey.self, perform: scrolled)
-                .onChange(of: cardsShown) { _, shown in
-                    if shown { scroll.fold = CardsFold() }  // opened again: measure afresh
-                }
+                .modifier(ChatScrollAnchor())
                 .background(Palette.page)
                 .safeAreaInset(edge: .bottom) {
                     if bot.kind == .source {
@@ -62,29 +48,40 @@
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Palette.page)
+                            .padding(.top, 18)
+                            .padding(.bottom, 12)
+                            .background(PageFade())
                     } else {
                         ChatInput(
-                            placeholder: store.isReplying(bot) ? "\(bot.name) 正在回复…" : "给 \(bot.name) 发消息",
-                            text: $draft, disabled: store.isReplying(bot)
+                            placeholder: store.isReplying(bot) ? "\(store.displayName(bot)) 正在回复…" : "给 \(store.displayName(bot)) 发消息",
+                            text: $draft, disabled: store.isReplying(bot), maxWidth: Self.chatWidth
                         ) {
                             let text = draft
                             draft = ""
                             cue = MascotCue(.greet)
                             Task {
-                                await store.send(text, to: bot)
-                                if store.message != nil { draft = text }  // not sent: keep it
+                                let sent = await store.send(text, to: bot)
+                                if !sent, draft.isEmpty { draft = text }  // not sent: keep it
                             }
                         }
                     }
                 }
                 .onChange(of: store.chats[bot.id]?.count) { old, new in
-                    // Down to a new line, not when the chat first loads: the page opens at the
-                    // top, with the character and its cards.
-                    guard let old, let new, new > old else { return }
-                    withAnimation { proxy.scrollTo(Self.bottom, anchor: .bottom) }
+                    guard let new else { return }
+                    // The chat came in after the page opened: down to its newest line at once;
+                    // a new line afterwards: down to it smoothly.
+                    if let old {
+                        guard new > old else { return }
+                        withAnimation { proxy.scrollTo(Self.bottom, anchor: .bottom) }
+                    } else {
+                        proxy.scrollTo(Self.bottom, anchor: .bottom)
+                    }
                 }
+            }
+            .environment(\.openBotCards) { cardsShown = true }
+            .inspector(isPresented: $cardsShown) {
+                BotCardsPanel(bot: bot, shown: $cardsShown)
+                    .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
             }
             .onAppear {
                 store.markSeen(bot)
@@ -96,7 +93,9 @@
                     cue = MascotCue(.talk)
                 }
             }
-            .navigationTitle(bot.name)
+            .navigationTitle(store.displayName(bot))
+            // The header already shows the name large; the window keeps it for its menu only.
+            .hiddenWindowTitle()
             .toolbar {
                 ToolbarItemGroup {
                     if bot.isAssistant {
@@ -118,48 +117,31 @@
                         }
                     }
                     RefreshButton()
+                    CardsPanelButton(shown: $cardsShown)
                 }
             }
             .sheet(isPresented: $showingRuns) {
                 RunsSheet().environmentObject(store)
             }
             // On opening, when the plugin is switched, and after every refresh of the App (each
-            // 30 s and the refresh button), so cards such as the usage limits stay current.
+            // 30 s and the refresh button), so cards such as the usage limits stay current;
+            // nothing to do when /today brought every plugin's cards.
             .task(id: CardsLoad(state: plugin?.state, refreshed: store.lastRefresh, plugins: bot.pluginIDs)) {
-                for id in bot.pluginIDs {
-                    await store.loadCards(id)
-                }
+                await store.loadCards(of: [bot])
             }
             .task {
                 await store.loadChat(bot)
-            }        }
-
-        func scrolled(_ geometry: PageGeometry) {
-            if let height = geometry.cardsHeight { scroll.cardsHeight = height }
-            guard cardsShown, !scroll.folding, let top = geometry.top, let end = geometry.cardsEnd
-            else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            if let reason = scroll.fold.check(offset: -top, cardsEnd: end, at: now) {
-                fold(reason)
             }
         }
+    }
 
-        func fold(_ reason: CardsFold.Reason) {
-            guard reason == .scrolledPast, let view = scroll.view else {
-                withAnimation(reduceMotion ? nil : .snappy) { cardsShown = false }
-                return
-            }
-            // The cards are above the window: take them out and scroll back by their height
-            // before anything is drawn, so the chat being read stays where it is.
-            let removed = scroll.cardsHeight + Self.spacing
-            scroll.folding = true
-            DispatchQueue.main.async {
-                let origin = view.contentView.bounds.origin
-                cardsShown = false
-                view.window?.contentView?.layoutSubtreeIfNeeded()
-                view.contentView.scroll(to: NSPoint(x: origin.x, y: origin.y - removed))
-                view.reflectScrolledClipView(view.contentView)
-                scroll.folding = false
+    extension View {
+        /// The window title's text taken out of the toolbar (macOS 15 and later).
+        @ViewBuilder func hiddenWindowTitle() -> some View {
+            if #available(macOS 15.0, *) {
+                self.toolbar(removing: .title)
+            } else {
+                self
             }
         }
     }

@@ -90,6 +90,59 @@ def weather(monkeypatch):
     return shown
 
 
+@pytest.mark.parametrize(
+    "field", ["precipitation_probability_max", "apparent_temperature_max", "temperature_2m_min"]
+)
+def test_incomplete_forecasts_do_not_invent_zero_values(field):
+    data = answer()
+    data["daily"][field][0] = None
+    with pytest.raises(forecast.WeatherError, match="^weather_bad_answer$"):
+        forecast.days(data)
+
+
+def test_a_later_day_missing_a_value_does_not_cost_today():
+    data = answer()
+    data["daily"]["uv_index_max"][2] = None
+    assert [day.date for day in forecast.days(data)] == [date(2026, 10, 26), date(2026, 10, 27)]
+
+
+@pytest.mark.parametrize("body", [b"not json", b"[]", b'{"daily":{"time":["2026-10-26"]}}'])
+def test_unusable_http_answers_are_weather_errors(body):
+    with pytest.raises(forecast.WeatherError, match="^weather_bad_answer$"):
+        forecast.fetch(0, 0, "UTC", get=lambda *a, **k: httpx.Response(200, content=body))
+
+
+async def test_bad_refresh_keeps_the_last_valid_forecast(service, weather):
+    await service.start()
+    try:
+        plugin = await enabled(service)
+        before = await plugin.cards()
+        weather["data"]["daily"]["precipitation_probability_max"][0] = None
+        with pytest.raises(forecast.WeatherError, match="^weather_bad_answer$"):
+            await plugin.refresh()
+        assert await plugin.cards() == before
+        assert (await plugin.weather_forecast({}))["problem"] == "weather_bad_answer"
+    finally:
+        await service.close()
+
+
+async def test_a_refresh_without_today_keeps_the_forecast_that_has_it(service, weather):
+    await service.start()
+    try:
+        plugin = await enabled(service)
+        before = await plugin.cards()
+        data = weather["data"]["daily"]
+        data["time"][0] = "2026-10-25"  # asked just before midnight, today missing a value
+        data["uv_index_max"][0] = 1
+        data["time"][1] = "2026-10-26"
+        data["uv_index_max"][1] = None
+        with pytest.raises(forecast.WeatherError, match="^weather_bad_answer$"):
+            await plugin.refresh()
+        assert await plugin.cards() == before
+    finally:
+        await service.close()
+
+
 async def enabled(service, config=HEFEI):
     await service.plugins.patch("weather", PluginPatch(enabled=True, config=config))
     plugin = service.plugins.instances["weather"]
@@ -146,7 +199,14 @@ async def test_the_morning_brief_runs_the_chosen_agent_once_a_day(service, weath
         plugin = await enabled(service, {**HEFEI, "brief_agent": "codex"})
         calls = []
 
-        async def run_agent(job, prompt, succeeded=None, incomplete_error=None, harness=None):
+        async def run_agent(
+            job, prompt, succeeded=None, incomplete_error=None, harness=None, grant=None
+        ):
+            assert grant.tools == {"memory_read"}
+            assert grant.plugin_tools == {
+                ("weather", "weather_forecast"),
+                ("weather", "weather_brief_write"),
+            }
             calls.append((job, harness, prompt))
             await plugin.brief_write({"date": "2026-10-26", "text": "早上好"})
             assert succeeded()

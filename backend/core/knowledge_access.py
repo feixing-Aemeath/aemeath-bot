@@ -131,6 +131,8 @@ class KnowledgeAccess:
         grant = grant or current_grant.get()
         if grant.kind is None and grant.reader is None:
             return None  # MAIN and legacy unscoped device grants
+        if grant.kind == "task":
+            return [] if grant.memory_read_paths is None else None
         areas = self.discover()
         if grant.kind == "organizer":
             return [a["path"] for a in areas if a["path"] == grant.area and a["readers"]]
@@ -141,6 +143,12 @@ class KnowledgeAccess:
         return [a["path"] for a in areas if grant.reader in a["readers"]]
 
     def require_read(self, relative, grant=None):
+        grant = grant or current_grant.get()
+        paths = grant.memory_read_paths
+        if paths is not None and not any(
+            relative.startswith(path) if path.endswith("/") else relative == path for path in paths
+        ):
+            raise ValueError("memory_not_allowed")
         allowed = self.allowed(grant)
         if allowed is not None and self.area_of(relative) not in allowed:
             raise ValueError("没有读取这个文件夹的权限")
@@ -154,7 +162,7 @@ class KnowledgeAccess:
             ] == "每日":
                 return
             raise ValueError("只能写自己的角色记忆和每日笔记")
-        if grant.kind in {"system", "organizer", "finance_report"}:
+        if grant.kind in {"system", "organizer", "finance_report", "task"}:
             raise ValueError("此运行不能使用 memory_write")
         if grant.reader is not None:
             self.require_read(relative, grant)
@@ -166,14 +174,27 @@ class KnowledgeAccess:
                 raise ValueError("只能写可读的系统区")
 
     def sql_filter(self, grant=None):
+        grant = grant or current_grant.get()
         allowed = self.allowed(grant)
-        if allowed is None:
-            return "1", []
         clauses, args = [], []
-        for area in allowed:
+        for area in allowed or []:
             if area == ".":
                 clauses.append("instr(path,'/')=0")
             else:
                 clauses.append("substr(path,1,?)=?")
                 args.extend([len(area) + 1, area + "/"])
-        return "(" + " OR ".join(clauses) + ")" if clauses else "0", args
+        area_sql = "(" + " OR ".join(clauses) + ")" if clauses else "0"
+        if allowed is None:
+            area_sql = "1"
+        if grant.memory_read_paths is None:
+            return area_sql, args
+        paths = []
+        for path in sorted(grant.memory_read_paths):
+            if path.endswith("/"):
+                paths.append("substr(path,1,?)=?")
+                args.extend([len(path), path])
+            else:
+                paths.append("path=?")
+                args.append(path)
+        path_sql = "(" + " OR ".join(paths) + ")" if paths else "0"
+        return f"{area_sql} AND {path_sql}", args

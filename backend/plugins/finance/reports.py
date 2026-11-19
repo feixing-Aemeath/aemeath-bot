@@ -16,7 +16,7 @@ def coverage_text(coverage):
     return (
         "；".join(
             f"{SOURCES[s]}账单截至 {c['through']}"
-            + ("（仅按最晚交易日，未确认完整覆盖）" if c["basis"] != "statement" else "")
+            + ("（未确认完整覆盖）" if c["basis"] != "statement" else "")
             if c["through"]
             else f"{SOURCES[s]}还没导入"
             for s, c in coverage.items()
@@ -169,8 +169,16 @@ class Reports:
         ):
             raise FinanceError("只允许描述记账数字和花钱节奏")
         if any(
-            r["counterpart"] and len(r["counterpart"]) >= 2 and r["counterpart"] in text
+            len(r[field]) >= minimum and r[field] in text
             for r in self.ledger.rows()
+            for field, minimum in (
+                ("counterpart", 2),
+                ("source_id", 6),
+                ("merchant_id", 6),
+                ("original_id", 6),
+                ("item", 8),
+                ("note", 8),
+            )
         ):
             raise FinanceError("月报解读只能包含汇总")
         target = safe_path(self.importer.context.memory.root, row["path"])

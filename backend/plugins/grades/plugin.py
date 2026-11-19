@@ -11,12 +11,19 @@ here, never by the model.
 import asyncio
 import csv
 import json
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
 from core.db import dump, uid
 from core.plugins import Plugin as BasePlugin
-from plugins.school.common import arguments_of, choice, key, local, source_refs, text, zone_of
+from plugins.school.common import arguments_of, choice, local, source_refs, text, zone_of
+
+
+def key(course):
+    """Ignore case, width and whitespace; symbols tell C++ from C#."""
+    return "".join(c for c in unicodedata.normalize("NFKC", course).casefold() if not c.isspace())
+
 
 CATEGORIES = ("必修", "选修", "通识", "实践", "其他")
 BOT = "成绩Bot"  # the character this plugin shows as in the App
@@ -114,7 +121,9 @@ def gpa(rows, scale):
     graded = [r for r in rows if r["score"] is not None]
     if not graded:
         return None
-    weights = [r["credits"] or 1 for r in graded]
+    weights = [r["credits"] if r["credits"] is not None else 1 for r in graded]
+    if not sum(weights):
+        return None
     total = sum(w * points(r["score"], scale) for w, r in zip(weights, graded, strict=True))
     return total / sum(weights)
 
@@ -206,6 +215,12 @@ class Plugin(BasePlugin):
 
     def _upsert(self, course, score, credits, term, category, origin, refs):
         number, grade, passed = parse_score(score)
+        if credits is not None and (
+            isinstance(credits, bool)
+            or not isinstance(credits, int | float)
+            or not 0 <= credits <= 30
+        ):
+            raise ValueError("credits must be a number 0-30")
         timestamp = datetime.now(UTC).isoformat()
         course_key = key(course)
         with self.db.connect() as conn:
@@ -215,6 +230,17 @@ class Plugin(BasePlugin):
             ).fetchone()
             if existing:
                 merged = list(dict.fromkeys(json.loads(existing["source_refs"]) + refs))
+                changed = any(
+                    existing[name] != value
+                    for name, value in {
+                        "course": course,
+                        "score": number,
+                        "grade": grade,
+                        "passed": int(passed),
+                        "credits": credits if credits is not None else existing["credits"],
+                        "category": category if category is not None else existing["category"],
+                    }.items()
+                )
                 conn.execute(
                     "UPDATE grades SET course=?, score=?, grade=?, passed=?, "
                     "credits=COALESCE(?, credits), category=COALESCE(?, category), origin=?, "
@@ -228,7 +254,7 @@ class Plugin(BasePlugin):
                         category,
                         origin,
                         dump(merged),
-                        timestamp,
+                        timestamp if changed else existing["updated_at"],
                         existing["id"],
                     ),
                 )
@@ -353,7 +379,9 @@ class Plugin(BasePlugin):
             result[kind] = {
                 "score": row["score"] if row else None,
                 "full": (row["full"] if row and row["full"] else None) or default["full"],
-                "required": (row["required"] if row else None) or default["required"],
+                "required": row["required"]
+                if row and row["required"] is not None
+                else default["required"],
             }
         return result
 

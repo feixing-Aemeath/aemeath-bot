@@ -12,6 +12,7 @@ MODELS = [
 
 class ClaudeCodeHarness(CLIHarness):
     executable = "claude"
+    completion_type = "result"
 
     def models(self):
         return [dict(model) for model in MODELS]

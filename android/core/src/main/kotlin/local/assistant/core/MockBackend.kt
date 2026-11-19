@@ -76,7 +76,7 @@ class MockBackend(
             rows.map {
                 if (it.status == "pending" && now >= instant(it.createdAt).plusSeconds(2)) it.copy(
                     status = "ready",
-                    text = "（模拟数据里的示例回复）连上 Mac 上的后端以后，我会查你的待办和记录来回答，也能帮你记待办。",
+                    text = "（模拟数据里的示例回复）连上后端以后，我会查你的待办和记录来回答，也能帮你记待办。",
                     updatedAt = instant(it.createdAt).plusSeconds(2).toString()
                 ) else it
             }
@@ -126,7 +126,7 @@ class MockBackend(
             )
             path == listOf("todos") -> page(
                 todoItems.filter {
-                    if (query["status"] == null) it.status != "deleted" else it.status == query["status"]
+                    if (query["status"] == null) it.visible else it.status == query["status"]
                 }
                     .map { Wire.encodeToJsonElement(it) }
             )
@@ -141,8 +141,8 @@ class MockBackend(
                 updated = updated.copy(
                     updatedAt = now,
                     syncStatus = "synced",
-                    reminderId = if (updated.status == "deleted") null else updated.reminderId,
-                    calendarEventId = if (updated.status == "deleted") null else updated.calendarEventId
+                    reminderId = if (!updated.visible) null else updated.reminderId,
+                    calendarEventId = if (!updated.visible) null else updated.calendarEventId
                 )
                 todoItems = todoItems.map { if (it.id == updated.id) updated else it }
                 bytes(updated)

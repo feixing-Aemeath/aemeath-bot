@@ -6,13 +6,23 @@ import XCTest
 final class StubProtocol: URLProtocol {
     static var handler: ((URLRequest) -> (Int, String))?
     static var requests: [URLRequest] = []
+    static var asyncHandler: ((URLRequest) async -> (Int, String))?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         StubProtocol.requests.append(request)
+        if let handler = StubProtocol.asyncHandler {
+            Task { respond(await handler(request)) }
+            return
+        }
         let (status, body) = StubProtocol.handler?(request) ?? (500, "")
+        respond((status, body))
+    }
+
+    private func respond(_ result: (Int, String)) {
+        let (status, body) = result
         let response = HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"])!
@@ -49,6 +59,7 @@ final class APIClientTests: XCTestCase {
         session = URLSession(configuration: configuration)
         StubProtocol.requests = []
         StubProtocol.handler = nil
+        StubProtocol.asyncHandler = nil
     }
 
     func client(_ base: String = "https://mini.example.ts.net", token: String? = "secret-token")
@@ -72,9 +83,31 @@ final class APIClientTests: XCTestCase {
              URLQueryItem(name: "status", value: "pending")])
     }
 
+    func testLiveBackendLoadsTodosBeyondFirstPage() async throws {
+        StubProtocol.handler = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            let offset = Int(query.first { $0.name == "offset" }?.value ?? "0")!
+            let limit = Int(query.first { $0.name == "limit" }!.value!)!
+            let items = (offset..<min(offset + limit, 201)).map {
+                Fixtures.todo.replacingOccurrences(of: "ab0904cc-b9d3-4732-a6aa-534f255a6722", with: "todo-\($0)")
+            }
+            return (200, "{\"items\":[\(items.joined(separator: ","))],\"total\":201}")
+        }
+        let todos = try await LiveBackend(client: client()).todos(status: .pending)
+        XCTAssertEqual(todos.count, 201)
+        XCTAssertEqual(todos.last?.id, "todo-200")
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        XCTAssertTrue(StubProtocol.requests.allSatisfy { $0.url!.query!.contains("status=pending") })
+    }
+
     func testEveryEndpointHitsTheDocumentedRoute() async throws {
         StubProtocol.handler = { request in
             switch (request.httpMethod ?? "", request.url!.path) {
+            case ("POST", "/prefix/api/v1/todos"): return (201, Fixtures.todo)
+            case ("POST", "/prefix/api/v1/inbox"): return (202, #"{"message_id":"forwarded","job_started":true}"#)
+            case ("GET", "/prefix/api/v1/todos/ab0904cc/sources"): return (200, #"{"items":[]}"#)
+            case ("POST", "/prefix/api/v1/plugins/qq_screen/open-chat"): return (202, #"{"accepted":true,"job_started":false}"#)
+            case ("GET", "/prefix/api/v1/stats/extraction"): return (200, #"{"weeks":[]}"#)
             case ("GET", "/prefix/api/v1/status"): return (200, Fixtures.status)
             case ("GET", "/prefix/api/v1/today"): return (200, Fixtures.today)
             case ("PATCH", "/prefix/api/v1/todos/ab0904cc"): return (200, Fixtures.todo)
@@ -128,11 +161,83 @@ final class APIClientTests: XCTestCase {
         var patch = SettingsPatch()
         patch.timezone = "Asia/Shanghai"
         _ = try await api.updateSettings(patch)
-        XCTAssertEqual(StubProtocol.requests.count, 14)
+        let created = try await api.createTodo(TodoNew(title: "单独记下"))
+        XCTAssertFalse(created.duplicate)
+        let forwarded = try await api.submitInbox(InboxItem(text: "转交的一段话", missed: true))
+        XCTAssertEqual(forwarded.messageID, "forwarded")
+        XCTAssertTrue(StubProtocol.body(of: StubProtocol.requests.last!)!.contains("\"missed\":true"))
+        _ = try await api.todoSources(id: "ab0904cc")
+        _ = try await api.openChat(pluginID: "qq_screen", chatName: "读书小组")
+        XCTAssertEqual(StubProtocol.body(of: StubProtocol.requests.last!), #"{"chat_name":"读书小组"}"#)
+        _ = try await api.extractionStats(weeks: 6)
+        XCTAssertTrue(StubProtocol.requests.last!.url!.query!.contains("weeks=6"))
+        XCTAssertEqual(StubProtocol.requests.count, 19)
         XCTAssertTrue(
             StubProtocol.requests.allSatisfy {
                 $0.value(forHTTPHeaderField: "Authorization") == "Bearer secret-token"
             })
+    }
+
+    func testCreateStatusAndLegacyReasonRetry() async throws {
+        for code in [200, 201] {
+            StubProtocol.handler = { _ in (code, Fixtures.todo) }
+            let result = try await client().createTodo(TodoNew(title: "不同输入"))
+            XCTAssertEqual(result.duplicate, code == 200)
+        }
+        StubProtocol.requests = []
+        StubProtocol.handler = { request in
+            StubProtocol.body(of: request)?.contains("reason") == true ? (422, "{}") : (200, Fixtures.todo)
+        }
+        _ = try await client().updateTodo(id: "t", .delete(reason: .wrongTime))
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        XCTAssertEqual(StubProtocol.body(of: StubProtocol.requests.last!), #"{"status":"deleted"}"#)
+        StubProtocol.requests = []
+        StubProtocol.handler = { _ in (422, "{}") }
+        do { _ = try await client().updateTodo(id: "t", .delete(reason: .duplicate)); XCTFail("refused") }
+        catch { XCTAssertEqual(error as? APIError, .invalidRequest) }
+        XCTAssertEqual(StubProtocol.requests.count, 2) // retry only once
+    }
+
+    func testNewEndpoints404AndScreenOpenDetail() async throws {
+        StubProtocol.handler = { _ in (404, "{}") }
+        let backend = LiveBackend(client: client())
+        do { _ = try await backend.createTodo(TodoNew(title: "一件事")); XCTFail() } catch { XCTAssertEqual(error as? APIError, .notFound) }
+        do { _ = try await backend.submitInbox(InboxItem(text: "原文")); XCTFail() } catch { XCTAssertEqual(error as? APIError, .notFound) }
+        do { _ = try await backend.todoSources(id: "t"); XCTFail() } catch { XCTAssertEqual(error as? APIError, .notFound) }
+        do { _ = try await backend.extractionStats(weeks: 4); XCTFail() } catch { XCTAssertEqual(error as? APIError, .notFound) }
+        do { _ = try await backend.openChat(pluginID: "qq_screen", chatName: "组"); XCTFail() } catch { XCTAssertEqual(error as? APIError, .notFound) }
+        for (status, detail) in [(403, "screen_open_not_whitelisted"), (403, "screen_open_not_allowed"), (409, "screen_open_daily_limit")] {
+            StubProtocol.handler = { _ in (status, "{\"detail\":\"\(detail)\"}") }
+            do { _ = try await client().openChat(pluginID: "qq_screen", chatName: "组"); XCTFail() }
+            catch { XCTAssertEqual(error as? APIError, .screenOpen(detail)) }
+        }
+    }
+
+    func testHistoryCursorAndRunCountQueries() async throws {
+        let client = client()
+        StubProtocol.handler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/runs") { return (200, #"{"items":[],"total":6}"#) }
+            return (200, #"{"items":[],"total":127,"has_more":true,"next_before":"h1.abc","earlier_date":"2026-10-14"}"#)
+        }
+        let chat = try await client.chatMessages(botID: "assistant", limit: 100, before: "h1.xyz")
+        XCTAssertEqual(chat.hasMore, true)
+        XCTAssertEqual(chat.nextBefore, "h1.abc")
+        let chatQuery = URLComponents(url: StubProtocol.requests.last!.url!, resolvingAgainstBaseURL: false)!
+        XCTAssertTrue(chatQuery.queryItems!.contains(URLQueryItem(name: "before", value: "h1.xyz")))
+        let since = APIDateCoding.date(from: "2026-10-15T00:00:00+08:00")!
+        let runs = try await client.runs(limit: 1, job: "extract_todos", status: .succeeded, since: since)
+        XCTAssertEqual(runs.total, 6)
+        XCTAssertNil(runs.nextBefore)
+        let runQuery = URLComponents(url: StubProtocol.requests.last!.url!, resolvingAgainstBaseURL: false)!
+        XCTAssertTrue(runQuery.queryItems!.contains(URLQueryItem(name: "status", value: "succeeded")))
+        XCTAssertTrue(runQuery.queryItems!.contains(URLQueryItem(name: "since", value: "2026-10-14T16:00:00Z")))
+    }
+
+    func testACancelledTodoDecodes() throws {
+        XCTAssertEqual(TodoStatus(rawValue: "cancelled"), .cancelled)
+        let decoded = try JSONDecoder().decode([TodoStatus].self, from: Data(#"["cancelled"]"#.utf8))
+        XCTAssertEqual(decoded, [.cancelled])
     }
 
     func testErrorsMapToCases() async {

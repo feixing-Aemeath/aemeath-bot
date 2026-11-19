@@ -13,6 +13,6 @@ let package = Package(
     targets: [
         .target(name: "AssistantCore"),
         .target(name: "AssistantUI", dependencies: ["AssistantCore"]),
-        .testTarget(name: "AssistantCoreTests", dependencies: ["AssistantCore"]),
+        .testTarget(name: "AssistantCoreTests", dependencies: ["AssistantCore", "AssistantUI"]),
     ]
 )

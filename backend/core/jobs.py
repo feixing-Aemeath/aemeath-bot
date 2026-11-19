@@ -3,6 +3,7 @@ import re
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -11,19 +12,25 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from core import private_files
 from core.prompts import render
 from core.store import ConflictError
-from core.tokens import current_grant
+from core.task_grants import extraction_grant
+from core.tokens import current_grant, task_grant
 from harness.claude_code import ClaudeCodeHarness
 from harness.codex import CodexHarness
 from harness.deepseek import DeepSeekHarness
+
+# A fixed code is a few short lowercase words (screen_window_obscured, apple_reminders_denied).
+# A token (a24_ and 43 random characters) or a long word of free text is not one.
+CODE = re.compile(r"[a-z][a-z0-9]{0,15}(?:_[a-z0-9]{1,16}){0,7}")
 
 
 def error_code(exc):
     """A failed job's error for runs: the exception's own fixed code (screen_history_gap,
     apple_sync_failed...) when it is one, never free text that could hold private data."""
     text = str(exc)
-    return text if re.fullmatch(r"[a-z][a-z0-9_]{2,60}", text) else "job_failed"
+    return text if len(text) <= 60 and CODE.fullmatch(text) else "job_failed"
 
 
 class Jobs:
@@ -120,6 +127,14 @@ class Jobs:
         )
         return task
 
+    def submit_if_idle(self, job_id):
+        """App fallback actions keep their durable input even when the job is busy."""
+        try:
+            self.submit(job_id)
+        except ConflictError:
+            return False
+        return True
+
     async def _drain(self, job_id, callback):
         try:
             while True:
@@ -139,7 +154,9 @@ class Jobs:
                 if job_id in self.self_timed:
                     await callback()
                 else:
-                    await asyncio.wait_for(callback(), settings.agent_timeout * 2 + 60)
+                    # A plugin can prefer a third harness in addition to the default order.
+                    timeout = (settings.agent_timeout + 5) * max(2, len(self.harnesses)) + 60
+                    await asyncio.wait_for(callback(), timeout)
                 db.finish_run(run_id)
                 return
             except asyncio.CancelledError:
@@ -204,13 +221,10 @@ class Jobs:
                 self.service.memory.access.require_read(grant.area + "/_", grant)
             run_id = db.start_run(job, name)
             chosen = {"model": model} if model and name == harness else {}
-            credential, context = None, None
-            if grant is not None:
-                attempt_grant = replace(grant, harness=name)
-                credential = self.service.tokens.temporary(
-                    attempt_grant, settings.agent_timeout + 30
-                )
-                context = current_grant.set(attempt_grant)
+            # A child left behind by a killed core must not retain its permanent token.
+            attempt_grant = replace(grant or task_grant(job), harness=name)
+            credential = self.service.tokens.temporary(attempt_grant, settings.agent_timeout + 30)
+            context = current_grant.set(attempt_grant)
             try:
                 result = await asyncio.wait_for(
                     self.harnesses[name].run(
@@ -218,7 +232,7 @@ class Jobs:
                     ),
                     settings.agent_timeout + 5,
                 )
-                completed = not result.success or succeeded is None or succeeded()
+                completed = result.success and (succeeded is None or succeeded())
             except asyncio.CancelledError:
                 db.finish_run(run_id, "cancelled", "cancelled")
                 raise
@@ -230,14 +244,11 @@ class Jobs:
                     self.service.tokens.discard(credential)
                 if context is not None:
                     current_grant.reset(context)
-            db.finish_run(run_id, "succeeded" if result.success else "failed", result.error)
+            error = incomplete_error if result.success and not completed else result.error
+            db.finish_run(run_id, "succeeded" if completed else "failed", error)
             if result.usage:
                 db.record_usage(run_id, job, name, result.usage)
-            if result.success:
-                # A zero CLI exit without the expected writes is not a success.
-                if not completed:
-                    db.finish_run(run_id, "failed", incomplete_error)
-                    continue
+            if completed:
                 return name
         raise RuntimeError("all_harnesses_failed")
 
@@ -245,9 +256,10 @@ class Jobs:
         if not self.service.store.unprocessed(limit=1):
             return
         settings = self.service.store.settings
+        local_now = datetime.now(ZoneInfo(settings.timezone))
         prompt = render(
             "extract_todos",
-            local_now=datetime.now(ZoneInfo(settings.timezone)).isoformat(),
+            local_now=local_now.isoformat(),
             timezone=settings.timezone,
             confidence_threshold=settings.confidence_threshold,
         )
@@ -256,18 +268,38 @@ class Jobs:
             prompt,
             succeeded=lambda: not self.service.store.unprocessed(limit=1),
             incomplete_error="messages_remaining",
+            grant=extraction_grant(local_now.date()),
         )
         await self.service.daily.write()  # what was just sorted out shows in today's folder
 
     async def sync(self):
         if error := getattr(self.service.apple.bridge, "error", None):
             raise RuntimeError(error)
-        result = await self.service.apple.flush()
+        read_failed = False
+        read = {"failed": 0, "mass_missing": 0}
+        try:
+            read = await self.service.apple.reconcile()
+        except RuntimeError:
+            read_failed = True
+        result = await self.service.apple.flush(
+            readback=False, read_failed=read_failed, failed_ids=read.get("failed_ids", [])
+        )
+        if read_failed:
+            raise RuntimeError("apple_sync_failed")
+        if read["failed"]:
+            raise RuntimeError("apple_reminder_edit_rejected")
+        if read["mass_missing"]:
+            raise RuntimeError("apple_reminders_mass_missing")
         if result["failed"]:
             raise RuntimeError("apple_sync_failed")
 
     async def index(self):
-        await asyncio.to_thread(self.service.memory.reindex)
+        worker = asyncio.create_task(asyncio.to_thread(self.service.memory.reindex))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
 
     async def daily_notes(self):
         await self.service.daily.write_recent()
@@ -275,20 +307,49 @@ class Jobs:
     async def watch(self):
         await self.service.watchdog.check()
 
+    def backup_due(self):
+        try:
+            newest = max(
+                (
+                    p.stat().st_mtime
+                    for p in self.service.settings.data_dir.glob("backups/*/COMPLETE")
+                ),
+                default=0,
+            )
+        except OSError:
+            return True  # let the backup job record and retry the filesystem failure
+        return datetime.now().timestamp() - newest >= 24 * 3600
+
     async def backup(self):
-        directory = (
-            self.service.settings.data_dir / "backups" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        )
-        directory.mkdir(parents=True)
-        with (
-            self.service.db.connect() as source,
-            sqlite3.connect(directory / "assistant.sqlite3") as target,
-        ):
-            source.backup(target)
-        shutil.copytree(self.service.memory.root, directory / "vault", symlinks=True)
-        (directory / "COMPLETE").write_text(
-            "SQLite online backup and Markdown vault\n", encoding="utf-8"
-        )
+        worker = asyncio.create_task(asyncio.to_thread(self._backup))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # A cancelled thread keeps copying; join it before a retry or shutdown.
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+
+    def _backup(self):
+        root = self.service.settings.data_dir / "backups"
+        private_files.directory(root)
+        directory = root / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        private_files.directory(directory)
+        try:
+            # Closed here: Windows cannot remove a file that is still open, so a failed backup
+            # would leave its partial copy behind.
+            with (
+                self.service.db.connect() as source,
+                closing(sqlite3.connect(directory / "assistant.sqlite3")) as target,
+            ):
+                source.backup(target)
+            shutil.copytree(self.service.memory.root, directory / "vault", symlinks=True)
+            (directory / "COMPLETE").write_text(
+                "SQLite online backup and Markdown vault\n", encoding="utf-8"
+            )
+            private_files.backups(directory)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
     async def close(self):
         self.pending.clear()

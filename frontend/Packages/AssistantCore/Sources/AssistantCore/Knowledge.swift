@@ -378,8 +378,13 @@ public enum Knowledge {
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]
 
-    public static func contentType(for name: String) -> String? {
-        uploadTypes[(name as NSString).pathExtension.lowercased()]
+    public static func contentType(for name: String, privateTopic: Bool = false) -> String? {
+        let ext = (name as NSString).pathExtension.lowercased()
+        let bills = [
+            "csv": "text/csv", "zip": "application/zip",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ]
+        return uploadTypes[ext] ?? (privateTopic ? bills[ext] : nil)
     }
 
     public static func fileName(_ path: String) -> String {

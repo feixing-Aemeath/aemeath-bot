@@ -2,24 +2,32 @@
     import AssistantCore
     import SwiftUI
 
-    /// Bots on the left, their page or settings on the right. The system sidebar button
-    /// brings the list back when a portrait window hides it.
+    /// 仪表盘 and the Bots on the left, the dashboard, a Bot's page or settings on the right. The
+    /// system sidebar button brings the list back when a portrait window hides it.
     public struct PadRootView: View {
+        @AppStorage("assistant.pad.cardsPanel") private var cardsShown = true
         @EnvironmentObject private var store: AppStore
         @AppStorage(PadPresentation.botStorageKey) private var chosen = Bot.assistantID
         @State private var showingSettings = false
         @State private var navigationID = UUID()
         @State private var visibility = NavigationSplitViewVisibility.automatic
 
-        public init() {}
+        public init() {
+            AwayClock.openIfAway(DashboardPage.id, key: PadPresentation.botStorageKey)
+        }
+
+        var showsDashboard: Bool { chosen == DashboardPage.id }
 
         var bot: Bot? {
-            PadPresentation.selectedBot(storedID: chosen, bots: store.bots, settled: store.settled)
+            guard !showsDashboard else { return nil }
+            return PadPresentation.selectedBot(storedID: chosen, bots: store.bots, settled: store.settled)
         }
 
         public var body: some View {
             NavigationSplitView(columnVisibility: $visibility) {
-                PadSidebar(chosen: showingSettings ? nil : (bot?.id ?? chosen), choose: choose, openSettings: openSettings)
+                PadSidebar(
+                    chosen: showingSettings ? nil : (showsDashboard ? chosen : bot?.id ?? chosen), choose: choose,
+                    openSettings: openSettings)
                     .navigationTitle("Aemeath Bot")
                     .navigationBarTitleDisplayMode(.inline)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 320)
@@ -28,8 +36,11 @@
                     Group {
                         if showingSettings {
                             SettingsHome(openBot: choose)
+                        } else if showsDashboard {
+                            DashboardPage(
+                                openBot: choose, openCards: { cardsShown = true; choose($0) }, openSettings: openSettings)
                         } else if let bot {
-                            PadBotPage(bot: bot).id(bot.id)
+                            PadBotPage(bot: bot, cardsShown: $cardsShown).id(bot.id)
                         } else {
                             Palette.page
                         }
@@ -43,7 +54,9 @@
             }
             .navigationSplitViewStyle(.balanced)
             .tint(Palette.clay)
-            .task { store.start() }
+            .onReceive(NotificationCenter.default.publisher(for: PhoneReach.routeNotification)) { note in
+                if let id = note.object as? String { choose(id) }
+            }
             .alert(
                 "出错了",
                 isPresented: Binding(
@@ -95,29 +108,23 @@
         let openSettings: () -> Void
 
         var body: some View {
-            let bots = store.bots
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    header("Bots")
-                    ForEach(bots.filter { $0.kind == .assistant || $0.kind == .character }) { bot in
-                        row(bot)
-                    }
-                    Palette.hairline
-                        .frame(height: 1)
+            BotSidebarList {
+                Button {
+                    choose(DashboardPage.id)
+                } label: {
+                    DashboardRow(side: 42)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                    ForEach(bots.filter { $0.kind == .knowledge }) { bot in
-                        row(bot)
-                    }
-                    let sources = bots.filter { $0.kind == .source }
-                    if !sources.isEmpty {
-                        header("消息来源").padding(.top, 12)
-                        ForEach(sources) { bot in row(bot) }
-                    }
+                        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(chosen == DashboardPage.id ? Palette.selection : .clear))
+                        .contentShape(RoundedRectangle(cornerRadius: 12))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-            }
+                .buttonStyle(.plain)
+                .hoverEffect(.highlight)
+                .accessibilityAddTraits(chosen == DashboardPage.id ? .isSelected : [])
+            } row: { row($0) }
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
                     Divider().overlay(Palette.hairline)
@@ -139,20 +146,11 @@
             .background(Palette.sidebar)
         }
 
-        func header(_ title: String) -> some View {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.top, 6)
-                .padding(.bottom, 2)
-        }
-
         func row(_ bot: Bot) -> some View {
             Button {
                 choose(bot.id)
             } label: {
-                PhoneBotRow(bot: bot, preview: PadPresentation.preview(messages: store.messages(bot), fallback: bot.intro))
+                PhoneBotRow(bot: bot)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)

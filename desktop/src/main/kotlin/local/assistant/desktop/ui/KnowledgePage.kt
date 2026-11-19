@@ -21,18 +21,22 @@ fun KnowledgePage(store: AppStore, route: Route, revision: Long, navigate: (Stri
     var file by remember { mutableStateOf<KnowledgeFile?>(null) }
     var loading by remember { mutableStateOf(true) }
     var reload by remember { mutableIntStateOf(0) }
-    LaunchedEffect(route, revision, reload) {
-        loading = true
-        try {
-            library = store.backend.knowledge()
-            if (route.page == "area") files = store.backend.knowledgeFiles(route.argument)
-            if (route.page == "file") file = store.backend.knowledgeFile(route.argument)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            store.error("没能读到知识库：${(error as? APIError)?.display ?: "操作失败"}")
+    val latestRevision by rememberUpdatedState(revision)
+    val api = store.backend
+    LaunchedEffect(route, api, reload) {
+        Knowledge.refresh(snapshotFlow { latestRevision }) {
+            loading = true
+            try {
+                library = api.knowledge()
+                if (route.page == "area") files = api.knowledgeFiles(route.argument)
+                if (route.page == "file") file = api.knowledgeFile(route.argument)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                store.error("没能读到知识库：${(error as? APIError)?.display ?: "操作失败"}")
+            }
+            loading = false
         }
-        loading = false
     }
     val overview = library
     if (overview == null) {

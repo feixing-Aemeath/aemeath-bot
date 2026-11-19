@@ -24,7 +24,10 @@ LIST_TIME = re.compile(
     r"(?:\s*\d{1,2}[:：]\d{2})?)$"
 )
 BADGE = re.compile(r"^(?:\d{1,3}\+?|…)$")
-TAG = re.compile(r"^\[[^\[\]]{1,8}\]")
+# A clock with one more digit than a clock has: OCR adds a stray 「1」 after some labels
+# (「昨天20:411」 for 「昨天20:41」, seen on 2026-11-14), which would drop the whole row.
+STRAY_DIGIT = re.compile(r"^(.*\d{1,2}[:：]\d{2})\d$")
+TAG = re.compile(r"^(\[[^\[\]]{1,8}\])\s*")
 SENDER = re.compile(r"^(?P<sender>[^：:\s][^：:]{0,19})[：:]\s*(?P<text>.+)$", re.S)
 MENTION_TAGS = ("[有人@我]", "[@全体成员]", "[@所有人]")
 
@@ -38,6 +41,8 @@ class PreviewItem:
     priority: bool
     everyone: bool = False
     label: str = ""  # the time column as read: 「20:41」「星期二」
+    top: float = 0.0  # where the preview line sits, as fractions of the captured height
+    bottom: float = 0.0
 
 
 def is_badge(block):
@@ -66,25 +71,44 @@ def _rows(blocks, layout):
     ]
 
 
-def parse_preview(blocks, layout, reference):
-    items, header = [], None
+def list_label(text):
+    """The list's time label as QQ shows it, or None when the text is no time label."""
+    label = text.strip()
+    if LIST_TIME.match(label):
+        return label
+    stray = STRAY_DIGIT.match(label)
+    return stray[1] if stray and LIST_TIME.match(stray[1]) else None
+
+
+def conversation_rows(blocks, layout):
+    """Every visible header, including rows whose preview is absent or a draft."""
+    entries = []
     for row in _rows(blocks, layout):
         last = row[-1]
-        if len(row) >= 2 and last.right > 0.85 and LIST_TIME.match(last.text.strip()):
-            header = ("".join(b.text.strip() for b in row[:-1]), last.text.strip())
-            continue
-        if header is None:
-            continue
-        parts = [b.text.strip() for b in row]
+        if len(row) >= 2 and last.right > 0.85 and (label := list_label(last.text)):
+            entries.append(("".join(b.text.strip() for b in row[:-1]), label, []))
+        elif entries and not entries[-1][2]:
+            entries[-1][2].extend(row)
+    return entries
+
+
+def parse_preview(blocks, layout, reference):
+    return preview_items(conversation_rows(blocks, layout), layout, reference)
+
+
+def preview_items(entries, layout, reference):
+    items = []
+    for chat, label, row in entries:
         if len(row) >= 2 and row[-1].right > 0.85 and is_badge(row[-1]):
-            parts = parts[:-1]  # unread count, or a muted / pinned icon read as a letter
-        text = " ".join(parts).strip()
-        chat, label = header
-        header = None
-        tags = []
+            row = row[:-1]  # unread count, or a muted / pinned icon read as a letter
+        text = " ".join(b.text.strip() for b in row).strip()
+        tags, content_tags = [], []
         while match := TAG.match(text):
-            tags.append(match.group(0))
-            text = text[match.end() :].strip()
+            tags.append(match[1])
+            if match[1] not in MENTION_TAGS:
+                content_tags.append(match[0])
+            text = text[match.end() :]
+        text = "".join(content_tags) + text
         if "[草稿]" in tags or not text:
             continue  # the user's own unsent draft
         # Group previews read "李老师：…"; one-to-one chats have no prefix. The full preview
@@ -99,7 +123,15 @@ def parse_preview(blocks, layout, reference):
         )
         items.append(
             PreviewItem(
-                chat, sender, text, parse_list_time(label, reference), priority, everyone, label
+                chat,
+                sender,
+                text,
+                parse_list_time(label, reference),
+                priority,
+                everyone,
+                label,
+                min(b.y for b in row),
+                max(b.bottom for b in row),
             )
         )
     return items

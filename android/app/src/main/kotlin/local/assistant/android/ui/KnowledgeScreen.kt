@@ -33,18 +33,22 @@ fun KnowledgeScreen(
     var loading by remember(route) { mutableStateOf(true) }
     var reload by remember(route) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
-    LaunchedEffect(route, revision, reload) {
-        loading = true
-        try {
-            overview = model.backend.knowledge()
-            if (route.page == "area") files = model.backend.knowledgeFiles(route.argument)
-            if (route.page == "file") file = model.backend.knowledgeFile(route.argument)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if ((e as? APIError)?.category != "not_found") model.error("没能读到知识库：${(e as? APIError)?.display ?: "操作失败"}")
+    val latestRevision by rememberUpdatedState(revision)
+    val api = model.backend
+    LaunchedEffect(route, api, reload) {
+        Knowledge.refresh(snapshotFlow { latestRevision }) {
+            loading = true
+            try {
+                overview = api.knowledge()
+                if (route.page == "area") files = api.knowledgeFiles(route.argument)
+                if (route.page == "file") file = api.knowledgeFile(route.argument)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if ((e as? APIError)?.category != "not_found") model.error("没能读到知识库：${(e as? APIError)?.display ?: "操作失败"}")
+            }
+            loading = false
         }
-        loading = false
     }
     if (loading && overview == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {

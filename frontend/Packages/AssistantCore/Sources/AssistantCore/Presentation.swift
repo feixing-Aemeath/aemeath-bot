@@ -24,7 +24,10 @@ public enum Names {
         case "video_notes": return "视频"
         case "finance": return "记账"
         // Lines typed to a Bot (POST /api/v1/bots/{id}/messages) are messages of this source.
+        case "share": return "我转给助手的"
+        case "app": return "我自己记的"
         case "chat": return "对话"
+        case "goals": return "目标"
         default: return id
         }
     }
@@ -112,6 +115,14 @@ public enum TodoSourceText {
         if !first.sender.isEmpty && first.sender != first.chatName {
             parts.append(first.sender)
         }
+        // What the user wrote or forwarded has no chat and sender worth naming: the backend
+        // files them under 「手动新建」 / 「转给助手」 and 「我」, and the line read
+        // 「我自己记的 · 手动新建 · 我」. A forwarded one keeps the chat the user named.
+        if first.plugin == "app" {
+            parts = [Names.plugin(first.plugin)]
+        } else if first.plugin == "share" {
+            parts = [Names.plugin(first.plugin)] + (first.chatName == "转给助手" ? [] : [first.chatName])
+        }
         var text = parts.joined(separator: " · ")
         let places = Set(sources.map { "\($0.plugin)\u{1f}\($0.chatName)" }).count
         if places > 1 {
@@ -130,7 +141,7 @@ public enum SyncState: Hashable, Sendable {
     case appOnly
 
     public init(_ todo: Todo) {
-        if todo.sourcePlugin == "watchdog" {
+        if todo.sourcePlugin.split(separator: ",").contains(where: { ["watchdog", "goals"].contains(String($0)) }) {
             self = .appOnly
         } else if let error = todo.syncError, !error.isEmpty {
             self = .failed(error)
@@ -208,7 +219,6 @@ public enum RunText {
     }
 }
 
-/// The one-line status under a plugin's sticker: "上次运行在 10 分钟前，提取了 3 条待办".
 /// The line under 知识库Bot's name: the knowledge base being organized, one of her inputs that
 /// could not start, or which inputs bring material in.
 public enum KnowledgeStatusLine {
@@ -227,6 +237,7 @@ public enum KnowledgeStatusLine {
     }
 }
 
+/// The one-line status under a plugin's sticker: 「10 分钟前读过消息，记下 3 条待办」.
 public enum PluginStatusLine {
     /// The plugin's own runs (`fetch:<id>`, `plugin:<id>:*`), newest first.
     public static func runs(of plugin: String, in runs: [Run]) -> [Run] {
@@ -242,23 +253,28 @@ public enum PluginStatusLine {
         case .error: return "出错：" + (RunText.error(plugin.error) ?? "未知原因")
         case .enabled: break
         }
+        // In the words of what the plugin does for the user, not of its jobs: a source reads
+        // messages, a character keeps something up to date. A character without jobs of its own
+        // (学分成绩, 请假: the Agent notes them down while reading) has no record yet, which
+        // 「还没有运行过」 made sound broken.
+        let source = plugin.provides.contains("source")
         let own = Self.runs(of: plugin.id, in: runs)
-        guard let last = own.first else { return "还没有运行过" }
+        guard let last = own.first else { return source ? "还没有读过消息" : "还没有记录" }
         if last.status == .running {
-            return "正在运行，已经 \(RunText.duration(last, now: now))"
+            return "\(source ? "正在读消息" : "正在更新")，已经 \(RunText.duration(last, now: now))"
         }
         let when = RelativeTime.describe(last.finishedAt ?? last.startedAt, now: now, calendar: calendar)
         if last.status != .succeeded {
             let reason = RunText.error(last.error) ?? RunText.status(last.status)
-            return "上次运行在 \(when)，\(reason)"
+            return "\(when)\(source ? "没读成" : "没更新成")：\(reason)"
         }
+        guard source else { return "\(when)更新过" }
         // Only message sources have todos extracted from them.
-        guard plugin.provides.contains("source") else { return "上次运行在 \(when)" }
         let extracted = todos.filter { todo in
             todo.status != .deleted && todo.createdAt >= last.startedAt
                 && todo.sourcePlugin.split(separator: ",").contains(Substring(plugin.id))
         }.count
-        return "上次运行在 \(when)，提取了 \(extracted) 条待办"
+        return extracted > 0 ? "\(when)读过消息，记下 \(extracted) 条待办" : "\(when)读过消息，没有新待办"
     }
 }
 
@@ -367,6 +383,29 @@ public enum AgentText {
         case .done: return "刚刚完成"
         case .idle: return "Mac 在线，空闲中"
         }
+    }
+
+    /// The assistant's line under its name, short: 「空闲 · 9 分钟前提炼过」, 「正在提炼待办」,
+    /// 「上次提炼失败 · 额度用完」. `lastRun` is the newest extraction, `lastSuccess` the newest
+    /// that went through.
+    public static func status(
+        _ state: MascotState, lastRun: Run?, lastSuccess: Run?, now: Date, calendar: Calendar
+    ) -> String {
+        switch state {
+        case .offline: return "连不上 Mac"
+        case .working: return "正在提炼待办"
+        case .error:
+            return RunText.error(lastRun?.error).map { "上次提炼失败 · \($0)" } ?? "上次提炼失败"
+        case .idle, .done:
+            guard let run = lastSuccess else { return "空闲 · 还没有提炼过" }
+            let when = RelativeTime.describe(run.finishedAt ?? run.startedAt, now: now, calendar: calendar)
+            return "空闲 · \(when)提炼过"
+        }
+    }
+
+    /// The Agents that cannot run now, by their names; empty when all can (or nothing is known).
+    public static func unavailable(_ agents: [String: AgentStatus]) -> [String] {
+        agents.filter { !$0.value.available }.keys.sorted().map(Names.harness)
     }
 
     /// "最近一次：提炼待办 · 失败 · 3 分钟前 · 额度用完".

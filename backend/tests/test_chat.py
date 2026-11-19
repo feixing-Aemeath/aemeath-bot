@@ -253,3 +253,58 @@ async def test_chat_reply_rejects_replies_that_are_not_pending(service):
                 await mcp.call_tool("chat_reply", arguments)
     finally:
         await service.close()
+
+
+@pytest.mark.parametrize("other_bot", ["knowledge", "weather"])
+async def test_chat_grant_can_only_reply_to_its_own_turn(service, other_bot):
+    mcp = create_mcp(service)
+    gate = asyncio.Event()
+    barrier = asyncio.Barrier(2)
+    denied = []
+
+    async def act(mcp, prompt):
+        await gate.wait()
+        reply = ids(prompt)[1]
+        other = next(t["reply"] for t in service.chat.turns.values() if t["reply"] != reply)
+        try:
+            await tool(mcp, "chat_reply", {"reply_id": other, "text": "串到另一轮的回复"})
+        except ToolError:
+            denied.append(reply)
+        await barrier.wait()
+        await tool(mcp, "chat_reply", {"reply_id": reply, "text": "本轮回复"})
+
+    agent = Agent(mcp, act)
+    service.jobs.harnesses = {"claude_code": agent, "codex": agent}
+    await service.start()
+    try:
+        if other_bot == "weather":
+            await service.plugins.patch("weather", PluginPatch(enabled=True))
+        await service.chat.send("assistant", "第一轮")
+        await service.chat.send(other_bot, "第二轮")
+        gate.set()
+        await finish(service)
+        assert len(denied) == 2
+        for bot_id in ("assistant", other_bot):
+            reply = service.chat.page(bot_id)["items"][0]
+            assert reply["status"] == "ready" and reply["text"] == "本轮回复"
+    finally:
+        await service.close()
+
+
+async def test_prompt_loading_failure_does_not_leave_a_pending_reply(service, monkeypatch):
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic unreadable prompt")
+
+    monkeypatch.setattr("core.chat.render", unreadable)
+    await service.chat.send("assistant", "在吗")
+    reply, _ = await finish(service)
+    assert reply["status"] == "failed" and reply["error"] == "chat_failed"
+    assert service.chat.turns == {}
+
+
+def test_chat_history_route_rejects_unknown_source_and_disabled_bots(service):
+    with client_for(service) as client:
+        for bot_id in ("missing", "qq_screen", "homework"):
+            assert client.get(f"/api/v1/bots/{bot_id}/messages").status_code == 404
+        assert client.get("/api/v1/bots/assistant/messages").status_code == 200
+        assert client.get("/api/v1/bots/knowledge/messages").status_code == 200

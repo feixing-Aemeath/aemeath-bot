@@ -136,20 +136,27 @@ class Importer:
             if len({s.source for s in statements}) != 1:
                 raise FinanceError("压缩包包含多种来源，请分别上传")
             first = statements[0]
+            ordered = sorted(statements, key=lambda s: s.start)
+            through = ordered[0].end
+            complete = all(s.coverage == "statement" for s in ordered)
+            for s in ordered[1:]:
+                if (s.start - through).days > 1:
+                    complete = False
+                through = max(through, s.end)
+            balances, balance_dates = {}, {}
+            for s in statements:
+                for account, cents in s.balances.items():
+                    at = s.balance_dates.get(account, s.end)
+                    if account not in balance_dates or at >= balance_dates[account]:
+                        balances[account], balance_dates[account] = cents, at
             return None, parsers.Statement(
                 first.source,
                 [r for s in statements for r in s.rows],
                 min(s.start for s in statements),
                 max(s.end for s in statements),
-                "statement"
-                if all(s.coverage == "statement" for s in statements)
-                else "transactions",
-                # The latest statement of each card has its balance.
-                {
-                    k: v
-                    for s in sorted(statements, key=lambda s: s.end)
-                    for k, v in s.balances.items()
-                },
+                "statement" if complete else "transactions",
+                balances,
+                balance_dates,
             )
 
     def one(self, filename, clock, password=None):
@@ -225,6 +232,8 @@ class Importer:
             if not path.is_file() or is_link(path) or path.suffix.lower() == ".zip":
                 result["skipped"] += 1
                 continue
+            if sha256(path) != imported["sha256"]:
+                raise FinanceError("归档账单的内容变了，请保留原件核对")
             statement = self.parse(path)
             if statement.source != imported["source"]:
                 raise FinanceError("归档账单的来源变了，请保留原件核对")

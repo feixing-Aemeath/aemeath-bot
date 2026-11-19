@@ -30,13 +30,13 @@ import java.time.LocalDate
 import kotlin.math.sin
 
 @Composable
-fun BotPage(bot: Bot, store: AppStore, state: DesktopState, navigate: (String, String) -> Unit) {
+fun BotPage(bot: Bot, store: AppStore, state: DesktopState, navigate: (String, String) -> Unit, visible: Boolean = true) {
     var cardsShown by remember { mutableStateOf(true) }
-    var days by remember { mutableIntStateOf(2) }
+    var earlier by remember(bot.id) { mutableIntStateOf(0) }
     val scroll = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val allMessages = store.messages(bot)
-    val (messages, hidden) = BotTimeline.recent(allMessages, days, store.zone)
+    val (messages, hidden) = BotTimeline.recent(allMessages, earlier, state.clock, store.zone)
     val status = store.botState(bot)
     val reduced = LocalReducedMotion.current
     val count = state.chats[bot.id]?.size
@@ -56,7 +56,9 @@ fun BotPage(bot: Bot, store: AppStore, state: DesktopState, navigate: (String, S
         if (cardsShown && scroll.firstVisibleItemIndex >= 3) cardsShown = false
     }
     LaunchedEffect(bot.id) { store.loadBot(bot.id) }
-    LaunchedEffect(allMessages.lastOrNull()?.id) { store.markSeen(bot.id) }
+    LaunchedEffect(bot.id, allMessages.lastOrNull()?.id, allMessages.lastOrNull()?.at, visible) {
+        store.markSeen(bot.id, visible)
+    }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f)) {
             LazyColumn(
@@ -72,14 +74,18 @@ fun BotPage(bot: Bot, store: AppStore, state: DesktopState, navigate: (String, S
                     }
                 }
                 item("divider") { WavyDivider(accent(bot.look.accent)) }
-                if (hidden > 0 || state.chats[bot.id].orEmpty().size >= 200) item("earlier") {
-                    TextButton(onClick = {
-                        days += 3
-                        scope.launch { store.loadChat(bot.id, earlier = true) }
-                    }, modifier = Modifier.fillMaxWidth()) { Muted(if (hidden > 0) "更早的消息（还有 $hidden 天）" else "读取更早的消息") }
+                BotTimeline.earlierLabel(hidden, state.clock, store.zone)?.let { label ->
+                    item("earlier") {
+                        TextButton(onClick = { earlier += 1 }, modifier = Modifier.fillMaxWidth()) { Muted(label) }
+                    }
+                }
+                if (hidden.isEmpty() && state.chats[bot.id].orEmpty().size >= 200) item("load-earlier") {
+                    TextButton(onClick = { scope.launch { store.loadChat(bot.id, earlier = true) } }, modifier = Modifier.fillMaxWidth()) {
+                        Muted("读取更早的消息")
+                    }
                 }
                 if (messages.isEmpty()) item("empty") {
-                    Muted("${bot.name} 还没有说过话。", Modifier.padding(vertical = 24.dp))
+                    Muted(if (hidden.isEmpty()) "${bot.name} 还没有说过话。" else "今天还没有新消息。", Modifier.padding(vertical = 24.dp))
                 }
                 var previousDay: LocalDate? = null
                 messages.forEach { message ->
@@ -247,8 +253,9 @@ private fun ChatInput(bot: Bot, store: AppStore, state: DesktopState) {
     fun send() {
         if (!canSend) return
         val sending = text
-        text = ""
-        scope.launch { if (!store.send(bot, sending)) text = sending }
+        scope.launch {
+            sendDraft(sending, { text }, { text = "" }) { store.send(bot, it) }
+        }
     }
     Column(
         Modifier.padding(horizontal = 24.dp, vertical = 12.dp).fillMaxWidth()
@@ -321,7 +328,7 @@ private fun ReadinessCard(store: AppStore) {
     val date = runCatching { LocalDate.parse(day) }.getOrNull()
     val appleInvalid = apple.isNotBlank() && checkin.appleReadiness == null
     CardBox("今天的记录") {
-        Muted("用来校准综合准备度：记满 3 周后，在 Mac 上运行 scripts.readiness_calibration，对比这两项和算出的分数，给出调整权重的建议。")
+        Muted("用来校准综合准备度：记满 3 周后，在后端电脑上运行 scripts.readiness_calibration，对比这两项和算出的分数，给出调整权重的建议。")
         OutlinedTextField(day, {
             day = it
             saved = false

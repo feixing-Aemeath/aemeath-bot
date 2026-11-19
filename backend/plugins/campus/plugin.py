@@ -7,16 +7,24 @@ two groups, or a leave request moving from 审批中 to 已批准, updates one r
 
 An activity can carry the 第二课堂 credits its notice promises. 「推荐参加」 ranks the ones still
 open: those giving credits first, then the nearest sign-up deadline; one that clashes with a
-class on the timetable goes last and says so.
+class on the timetable goes last and says so (one running longer than a day clashes with none).
+
+With `dekt_sync` on, every two hours the activities open for sign-up on the 第二课堂 site and the
+user's own sign-ups are read from the user's logged-in Chrome tab (dekt.py) into the same
+records. Signed-up ones show on 「我报名的活动」 and are not recommended again. The site also
+says whether the user may sign up for each: one not open to them is left out everywhere, a full
+one is shown as such and not recommended.
 """
 
 import asyncio
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from core.db import dump, uid
 from core.plugins import Plugin as BasePlugin
+from plugins.campus import dekt
 from plugins.school.common import (
     arguments_of,
     choice,
@@ -42,6 +50,21 @@ OPTIONAL_KINDS = ("讲座", "比赛", "报名", "文体", "志愿", "其他")
 RECOMMENDED = 5
 # An activity with a start time but no end is taken to last this long for clashes.
 ASSUMED_HOURS = 1.5
+# One that runs longer than this is a stretch to take part in or hand work in when one likes
+# (「百物巧变」 from tonight to the day after tomorrow), not a time to be there, so it clashes
+# with nothing.
+LONGEST_SESSION = timedelta(days=1)
+DEKT = "dekt"  # kv: the latest 第二课堂 read
+SIGNED_UP = "已报名"
+# A failed 第二课堂 read on the cards, by the code dekt.py raises.
+DEKT_PROBLEMS = {
+    "chrome_js_disabled": "在 Chrome 菜单栏里点「查看」→「开发者」→「允许 Apple 事件中的 JavaScript」。",
+    "dekt_tab_not_open": "在 Chrome 里打开第二课堂（学校应用中心 → 第二课堂），让那个标签页一直开着。",
+    "dekt_logged_out": "第二课堂的登录过期了：在 Chrome 里重新登录，再打开第二课堂。",
+    "chrome_not_running": "Chrome 没有打开。打开 Chrome 和第二课堂那一页后，两小时内会读到。",
+    "chrome_automation_denied": "系统设置 → 隐私与安全性 → 自动化：在后端（python）下面打开「Google Chrome」。",
+    "chrome_timeout": "可能在等你允许：屏幕上有「想要控制 Google Chrome」的提示的话点「好」。",
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS campus_events (
@@ -96,13 +119,94 @@ class Plugin(BasePlugin):
             conn.executescript(SCHEMA)
             # Tables from before activities carried 第二课堂 credits get the two columns.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(campus_events)")}
-            for column, kind in (("credits", "REAL"), ("credit_kind", "TEXT")):
+            for column, kind in (
+                ("credits", "REAL"),
+                ("credit_kind", "TEXT"),
+                ("signup_status", "TEXT"),  # 已报名, from the 第二课堂 site
+                ("signup_block", "TEXT"),  # why the site will not take the user's sign-up
+            ):
                 if column not in columns:
                     conn.execute(f"ALTER TABLE campus_events ADD COLUMN {column} {kind}")
         self.past_days = config.get("past_days", 3)
 
     def now(self):
         return datetime.now(zone_of(self.context))
+
+    def jobs(self):
+        if not self.config.get("dekt_sync", False):
+            return {}
+        # Off the half hours, when QQ and the timetable read the screen.
+        return {"dekt": {"cron": "17 */2 * * *", "callback": self.sync_dekt}}
+
+    async def watch(self):
+        """For the watchdog (core/watchdog.py): the 第二课堂 site not read for six hours."""
+        status = self.context.get(DEKT, {})
+        error = status.get("error")
+        if not self.config.get("dekt_sync", False) or not error:
+            return []
+        return [
+            {
+                "key": "dekt",
+                "title": "第二课堂读不到了",
+                "ok_at": status.get("ok_at"),
+                "hours": 6,
+                "hint": DEKT_PROBLEMS.get(error, "读第二课堂没成功；后台两小时后再试。"),
+                "jobs": ["dekt"],
+            }
+        ]
+
+    async def sync_dekt(self):
+        """Read the 第二课堂 site's open activities and the user's sign-ups (dekt.py) into
+        campus_events. Each problem reaches the runs once, as with the timetable."""
+        now = self.now()
+        previous = self.context.get(DEKT, {})
+        try:
+            data = await dekt.fetch()
+        except Exception as error:
+            code = str(error)
+            if not re.fullmatch(r"[a-z][a-z0-9_]{2,40}", code):
+                code = "dekt_failed"
+            self.context.put(DEKT, {**previous, "checked_at": now.isoformat(), "error": code})
+            if code != previous.get("error"):
+                raise RuntimeError(code) from None
+            return previous
+        counts = await asyncio.to_thread(self._store_dekt, data, now.tzinfo)
+        status = {"checked_at": now.isoformat(), "error": None, "ok_at": now.isoformat(), **counts}
+        self.context.put(DEKT, status)
+        return status
+
+    def _store_dekt(self, data, zone):
+        signed = []
+        for items, mine in ((data["mine"], True), (data["open"], False)):
+            for item in items:
+                if not isinstance(item, dict) or not (values := dekt.event_values(item, zone)):
+                    continue
+                if mine:
+                    values["signup_status"] = SIGNED_UP
+                day = (
+                    local(values["starts_at"], zone).date().isoformat()
+                    if values["starts_at"]
+                    else ""
+                )
+                # Only the site's fields change; credits an Agent read in a notice stay.
+                record = self._upsert(
+                    "campus_events",
+                    key(values["title"], day),
+                    values,
+                    [dekt.ref(item)],
+                    set(values),
+                )["record"]
+                if mine:
+                    signed.append(record["id"])
+        # Sign-ups the site no longer lists were cancelled.
+        placeholders = ",".join("?" for _ in signed)
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE campus_events SET signup_status=NULL WHERE signup_status IS NOT NULL"
+                + (f" AND id NOT IN ({placeholders})" if signed else ""),
+                signed,
+            )
+        return {"open": len(data["open"]), "mine": len(signed)}
 
     def mcp_tools(self):
         return {
@@ -259,7 +363,9 @@ class Plugin(BasePlugin):
             )
             if row["kind"] not in OPTIONAL_KINDS or not (start or deadline):
                 continue
-            if (start and start <= now) or (deadline and deadline < now):
+            if row.get("signup_status") or row.get("signup_block"):
+                continue  # signed up already, or the 第二课堂 site will not take it
+            if self._started(row, now) or (deadline and deadline < now):
                 continue
             picks.append((row, self.clash(row, now.tzinfo)))
         picks.sort(
@@ -272,37 +378,73 @@ class Plugin(BasePlugin):
         )
         return picks
 
+    @staticmethod
+    def _started(row, now):
+        start = local(row["starts_at"], now.tzinfo)
+        if row["ends_at"] and local(row["ends_at"], now.tzinfo) <= now:
+            return True
+        if start is None:
+            return False
+        return start <= now if row["has_time"] else start.date() < now.date()
+
     def clash(self, row, zone):
         """The class (title) a timed activity overlaps, from the timetable, guessed weeks
-        included; None when it overlaps none or nothing is known."""
+        included; None when it overlaps none, runs longer than a day or nothing is known."""
         start = local(row["starts_at"], zone)
         if not start or not row["has_time"]:
             return None
         end = local(row["ends_at"], zone) or start + timedelta(hours=ASSUMED_HOURS)
-        try:
-            classes, _ = day_entries(self.db, start.date())
-        except sqlite3.OperationalError:  # the timetable was never enabled
+        if end - start > LONGEST_SESSION:
             return None
-        first, last = (
-            start.strftime("%H:%M"),
-            end.strftime("%H:%M") if end.date() == start.date() else "24:00",
-        )
-        for entry in classes:
-            if entry["start_time"] < last and first < entry["end_time"]:
-                return entry["title"]
+        day = start.date()
+        while day <= end.date():
+            try:
+                classes, _ = day_entries(self.db, day)
+            except sqlite3.OperationalError:  # the timetable was never enabled
+                return None
+            for entry in classes:
+                if entry["kind"] != "课程":
+                    continue
+                first = datetime.fromisoformat(f"{day}T{entry['start_time']}").replace(tzinfo=zone)
+                last = datetime.fromisoformat(f"{day}T{entry['end_time']}").replace(tzinfo=zone)
+                if first < end and start < last:
+                    return entry["title"]
+            day += timedelta(days=1)
         return None
 
     def events(self, upcoming, now):
-        rows = [row_view(r) for r in self.db.rows("SELECT * FROM campus_events")]
+        # Activities the 第二课堂 site says are not open to the user are none of their business.
+        rows = [
+            row_view(r)
+            for r in self.db.rows(
+                "SELECT * FROM campus_events WHERE signup_block IS NULL OR signup_block<>?",
+                (dekt.NOT_FOR_YOU,),
+            )
+        ]
         if upcoming:
-            since = (now - timedelta(days=self.past_days)).astimezone(UTC).isoformat()
-            rows = [r for r in rows if self._event_end(r) is None or self._event_end(r) >= since]
+            since = now - timedelta(days=self.past_days)
+            kept = []
+            for row in rows:
+                end = local(self._event_end(row), now.tzinfo)
+                if row["starts_at"] and not row["ends_at"] and not row["has_time"]:
+                    # An undated time of day remains visible through its entire local date.
+                    visible = end + timedelta(days=1) > since
+                else:
+                    visible = end is None or end >= since
+                if visible:
+                    kept.append(row)
+            rows = kept
         # Dated activities soonest first, undated ones after them, newest first.
         dated = sorted((r for r in rows if r["starts_at"]), key=lambda r: r["starts_at"])
         undated = sorted(
             (r for r in rows if not r["starts_at"]), key=lambda r: r["created_at"], reverse=True
         )
         return dated + undated
+
+    @classmethod
+    def _ended(cls, row, now):
+        end = local(cls._event_end(row), now.tzinfo)
+        return end is not None and end < now and bool(row["ends_at"] or row["has_time"])
 
     @staticmethod
     def _event_end(row):
@@ -389,6 +531,15 @@ class Plugin(BasePlugin):
                 }
             ]
         cards = []
+        mine = [r for r in events if r.get("signup_status") and not self._ended(r, now)]
+        if mine:
+            cards.append(
+                {
+                    "type": "list",
+                    "title": "我报名的活动",
+                    "data": {"items": [self._mine_item(r, now) for r in mine]},
+                }
+            )
         picks = self.recommend(now)[:RECOMMENDED]
         if picks:
             cards.append(
@@ -421,13 +572,15 @@ class Plugin(BasePlugin):
             r
             for r in events
             if r["starts_at"]
-            and now.date() <= local(r["starts_at"], now.tzinfo).date()
+            and not self._started(r, now)
             and local(r["starts_at"], now.tzinfo) < week_end
         ]
         signups = [
             r
             for r in events
-            if r["signup_deadline"] and local(r["signup_deadline"], now.tzinfo) >= now
+            if r["signup_deadline"]
+            and not self._started(r, now)
+            and local(r["signup_deadline"], now.tzinfo) >= now
         ]
         stat = {"value": len(this_week), "unit": "个", "label": "这周剩下的活动"}
         if signups:
@@ -470,8 +623,23 @@ class Plugin(BasePlugin):
         return item
 
     @staticmethod
+    def _mine_item(row, now):
+        parts = []
+        if row["starts_at"]:
+            parts.append(when_text(row["starts_at"], row["has_time"], now))
+        if row["place"]:
+            parts.append(row["place"])
+        item = {"title": row["title"], "detail": row["signup_status"]}
+        if parts:
+            item["subtitle"] = " · ".join(parts)
+        return item
+
+    @staticmethod
     def _event_item(row, now):
         parts = []
+        for status in (row.get("signup_status"), row.get("signup_block")):
+            if status:
+                parts.append(status)
         if row["starts_at"]:
             parts.append(when_text(row["starts_at"], row["has_time"], now))
         if row["place"]:

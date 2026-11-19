@@ -110,10 +110,9 @@ class DeepSeekHarness:
 
     async def read_models(self):
         try:
+            key = await asyncio.to_thread(self.key)
             async with self.client(base_url=self.base_url, timeout=20) as client:
-                response = await client.get(
-                    "/models", headers={"Authorization": f"Bearer {self.key()}"}
-                )
+                response = await client.get("/models", headers={"Authorization": f"Bearer {key}"})
             items = response.json().get("data") or [] if response.status_code == 200 else []
             found = [
                 {"id": item["id"], "name": item["id"]}
@@ -137,16 +136,16 @@ class DeepSeekHarness:
     # One run ------------------------------------------------------------------------------
 
     async def run(self, prompt, mcp_config, timeout, model=None) -> RunResult:
-        key = self.key()
-        if not key:
-            return RunResult(False, "deepseek_key_missing")
-        if not self.known_models and not (model or self.default_model):
-            await self.read_models()
         try:
-            return await asyncio.wait_for(
-                self.loop(prompt, mcp_config["environment"], key, model or self.chosen_default()),
-                timeout,
-            )
+            async with asyncio.timeout(timeout):
+                key = await asyncio.to_thread(self.key)
+                if not key:
+                    return RunResult(False, "deepseek_key_missing")
+                if not self.known_models and not (model or self.default_model):
+                    await self.read_models()
+                return await self.loop(
+                    prompt, mcp_config["environment"], key, model or self.chosen_default()
+                )
         except TimeoutError:
             return RunResult(False, "timeout")
 
@@ -163,6 +162,7 @@ class DeepSeekHarness:
         async with core, api:
             listed = await core.get("/internal/tools")
             tools = [function(tool) for tool in listed.json()]
+            tool_names = {tool["function"]["name"] for tool in tools}
             messages = [{"role": "user", "content": prompt}]
             for _ in range(MAX_TURNS):
                 try:
@@ -175,6 +175,8 @@ class DeepSeekHarness:
                 if response.status_code != 200:
                     # The body may echo the request; only its kind is kept (base.classify).
                     error = "authentication_required" if response.status_code == 401 else None
+                    if response.status_code in {402, 429}:
+                        error = "quota_exhausted"
                     return RunResult(False, error or classify(response.text), usage)
                 body = response.json()
                 used = body.get("usage") or {}
@@ -183,7 +185,14 @@ class DeepSeekHarness:
                     count(used.get("prompt_cache_hit_tokens")),
                     count(used.get("completion_tokens")),
                 )
-                message = (body.get("choices") or [{}])[0].get("message") or {}
+                choice = (body.get("choices") or [{}])[0]
+                message = choice.get("message")
+                if not isinstance(message, dict) or choice.get("finish_reason") not in {
+                    None,
+                    "stop",
+                    "tool_calls",
+                }:
+                    return RunResult(False, "agent_incomplete", usage)
                 calls = message.get("tool_calls") or []
                 messages.append(
                     {
@@ -197,11 +206,17 @@ class DeepSeekHarness:
                 for call in calls:
                     name = call.get("function", {}).get("name", "")
                     try:
+                        if name not in tool_names:
+                            raise ValueError("unknown_tool")
                         arguments = json.loads(call["function"].get("arguments") or "{}")
                         result = (await core.post(f"/internal/tools/{name}", json=arguments)).json()
                         text = tool_text(result)
                     except (ValueError, KeyError, httpx.HTTPError) as error:
-                        text = f"tool_failed: {type(error).__name__}"
+                        text = (
+                            "tool_failed: unknown_tool"
+                            if name not in tool_names
+                            else f"tool_failed: {type(error).__name__}"
+                        )
                     messages.append(
                         {"role": "tool", "tool_call_id": call.get("id"), "content": text}
                     )

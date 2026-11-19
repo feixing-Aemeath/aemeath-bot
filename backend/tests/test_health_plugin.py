@@ -59,7 +59,7 @@ async def test_health_plugin_lifecycle_tools_and_upload_job(service):
         assert not HEALTH_TOOLS & {t.name for t in await mcp.list_tools()}
         await service.plugins.patch("health", PluginPatch(enabled=True))
         tools = {t.name: t for t in await mcp.list_tools()}
-        assert HEALTH_TOOLS <= set(tools) and len(tools) == 17
+        assert HEALTH_TOOLS <= set(tools) and len(tools) == 19
         assert "not a diagnosis" in tools["health_get_daily"].description
         assert "plugin:health:refresh" in service.jobs.callbacks
 

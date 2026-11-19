@@ -48,7 +48,7 @@ public enum MockData {
         }
         return Today(
             date: formatter.string(from: now),
-            summary: "班级群有 2 条截止通知，实验室提醒年度材料明天截止。",
+            summary: "**新待办**\n- 班级群：学生信息核对，今天 17:00\n- 实验室：年度材料，明天 18:00",
             todos: dueToday,
             cards: [
                 Card(

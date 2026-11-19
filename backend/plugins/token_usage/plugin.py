@@ -130,6 +130,36 @@ class Plugin(BasePlugin):
 
         return await asyncio.to_thread(build)
 
+    def charts(self):
+        """Charts 用量Bot can draw into a chat reply, from the same counts as the cards."""
+        days = {
+            "type": "integer",
+            "minimum": 7,
+            "maximum": 60,
+            "default": 30,
+            "description": "看最近几天（含今天）",
+        }
+        return {
+            "daily": {
+                "title": "每天的 Token 消耗",
+                "description": "折线图；读到自己用的记录时分成助手任务和自己用的两条线",
+                "params": {"days": days},
+                "build": self.daily_chart,
+            },
+            "agents": {
+                "title": "各 Agent 的用量占比",
+                "description": "环形图：最近几天 Claude Code 和 Codex 各用了多少 token",
+                "params": {"days": {**days, "minimum": 1}},
+                "build": self.agents_chart,
+            },
+        }
+
+    async def daily_chart(self, values):
+        return await asyncio.to_thread(lambda: self.ledger().chart_card(values["days"]))
+
+    async def agents_chart(self, values):
+        return await asyncio.to_thread(lambda: self.ledger().agents_card(values["days"]))
+
     async def check(self):
         await self.import_sessions()
 

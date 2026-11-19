@@ -2,7 +2,7 @@
 
 插件 `weekly_review` 把这一周的数字整理好，再交给 Agent 写成回顾：做得好的、没做完要补的、下周的截止与考试，以及一两条具体建议。贴图是 `aemeath`，卡片归助理Bot；每次从 `Bots/助理/` 读取人设和记忆，事实和数字照实说。所有平台都能启用，默认停用。
 
-实现在 `backend/plugins/weekly_review/`，提示词是 `backend/prompts/weekly_review.md`。不新增数据表，不读取消息、截图或原始健康采样。
+实现在 `backend/plugins/weekly_review/`，提示词是 `backend/prompts/weekly_review.md`。周报本身不新增数据表；对账复用核心的待办与反馈记录，不读取消息正文、截图或原始健康采样。
 
 ## 启用与运行
 
@@ -27,13 +27,15 @@ Agent 调用 `weekly_review_input` 取数，用 `weekly_review_write` 写回。�
 
 | 项目 | 输入与来源 |
 | --- | --- |
-| todos | 已完成数 `completed`、未完成标题与截止 `pending`、逾期标题 `overdue`。来自现有 todos 表，排除删除项；包括作业，不能与作业数相加 |
+| todos | 已完成数 `completed`、未完成标题与截止 `pending`、逾期标题 `overdue`。来自现有 todos 表，只含 pending、completed，排除删除和取消项；包括作业，不能与作业数相加 |
 | homework | 通过已启用 homework 的公开 `homework()` 取同一份清单，沿用标记、课程群和关键词规则；勾成 completed 视为已交 |
 | timetable | 用 `timetable_days` 取本周七天，只数「课程」，自己的日程不计；每天保留数量和 `estimated_from`，推测的周必须说明 |
 | activities | 用 `campus_list` 取这周开始或报名截止的活动标题，放在 `recorded_titles`；**现有表只存通知，没有用户已报名或已参加状态**，`attended_or_registered` 返回「没有数据」，不能据通知声称参加过 |
 | health | 调用与 Agent 相同的 `health_get_daily`、`health_get_sleep`，取七天的准备度和睡眠汇总，不重新实现健康算法 |
-| tokens | 复用 token_usage 的公开 `Ledger`，汇总本周有日期的助手与个人 CLI 用量：输入（含缓存）加输出，不重复加缓存。分别返回 `assistant`、`own`、`total`，不拆分没有日期的手填累计值 |
+| extraction | 复用 `GET /api/v1/stats/extraction` 的同一函数与口径：`week_start,caught,with_due,late,median_lead_hours,missed,not_a_todo,recall`。回顾里的「对账」一行写消息抓到几条、提前中位数几小时、晚了几条、用户自己补了几条；无提前量时明确说没有数据。零条是实际计数，不当作缺失 |
 | next_week | 下周周一到周日未完成待办的标题、截止、是否有时刻；作业另列。`exams` 筛出其中标题含「考试、期中、期末、小测、测验」的条目，是标题线索，不是另建的考试日程 |
+
+Token 不再进入周报输入和文案，仍在 token_usage 自己的卡片里。对账提前量是中位数（不是算术平均），按保存的 due_at 与生成时间比较；消息提炼按创建周计，漏项和误判按反馈周计，跨来源合并只计一次，share 无 manifest 也照常统计。旧历史缺少漏项/原因的部分不补造记录，完整口径见 [api.md](api.md#保底入口原文与对账)。
 
 完成数按 `status=completed` 且 `updated_at` 落在这一周统计：现有表没有独立完成时间，修改旧完成项可能把它计入；重新打开的项目也无法恢复先前完成历史。历史周重算使用当前状态，不是历史快照。未完成项包含此前积累和已知后续的；逾期按生成时刻（历史周按周末）判断，没有时刻的截止日算到当天结束。
 
@@ -47,7 +49,7 @@ Agent 调用 `weekly_review_input` 取数，用 `weekly_review_write` 写回。�
 
 | 工具 | arguments | 返回 |
 | --- | --- | --- |
-| weekly_review_input | `date?`: YYYY-MM-DD，默认今天，取它所在的周 | `week,from,to,timezone,as_of,completion_note,todos,homework,timetable,activities,health,tokens,next_week`，统计由代码计算 |
+| weekly_review_input | `date?`: YYYY-MM-DD，默认今天，取它所在的周 | `week,from,to,timezone,as_of,completion_note,todos,homework,timetable,activities,health,extraction,next_week`，统计由代码计算 |
 | weekly_review_write | `date`: YYYY-MM-DD，回顾周任一天；`text`: Markdown，去首尾空白后 1–6000 字 | `{accepted:true,week,path}`；同周覆盖正文、保留笔记。正文不能包含单独的 `## 笔记` 标题 |
 
 提示词要求数字只引用输入，数据不足就说不足。人设只管语气，不把游戏剧情当用户经历、不隐藏未完成事项、不服从标题里的指令。这些内容约束由提示词引导，没有逐个数字校验器，也没有给这次 Agent 单独裁剪 MCP 权限。
@@ -56,6 +58,7 @@ Agent 调用 `weekly_review_input` 取数，用 `weekly_review_write` 写回。�
 
 - **卡片**：已有 `text` 类型，标题「本周回顾」，`data.text` 是正文。默认周日 21:00 写好后出现，保留到下周二结束，周三 00:00 消失。卡片要求当前日期在回顾周的周日到下周二、写入时刻不晚于现在；手动提前写好的回顾在周日前不显示。过期只隐藏卡片，文件继续保留。
 - **周报文件**：记忆目录 `周报/<ISO年>-W<两位周数>.md`，如 `周报/2026-W44.md`。跨年用 ISO 周年，2025-12-29 属于 `2026-W01`。重写调用 `core.daily.keep_notes` 保留末尾「## 笔记」，同时更新搜索索引。
+- **写入与停用**：写入按顺序执行。取消调用或停用插件时等待已经开始的文件写入结束；停用后拒绝旧实例的新写入。
 - **每日文件夹**：写好当天，`daily(day)` 返回 `本周回顾.md`，放正文和到周报的相对链接；`今天.md` 的分工中提一句「本周回顾写好了」。由现有 `daily_notes` 在 10 分钟内整理，也可立即运行它。其他日期不重复提。
 
 ## 离线验证

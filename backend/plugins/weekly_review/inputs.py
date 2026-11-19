@@ -3,8 +3,9 @@
 import asyncio
 from datetime import datetime, time, timedelta
 
+from core.extraction_stats import extraction_stats
+from core.message_signals import redact_todo
 from plugins.school.common import local, zone_of
-from plugins.token_usage.usage import Ledger
 
 MISSING = "没有数据"
 
@@ -79,10 +80,14 @@ class Inputs:
     async def read(self):
         todos = await asyncio.to_thread(
             self.context.store.db.rows,
-            "SELECT title,due_at,has_time,status,created_at,updated_at FROM todos "
-            "WHERE status!='deleted' ORDER BY due_at,title",
+            "SELECT title,due_at,has_time,status,created_at,updated_at,source_plugin FROM todos "
+            "WHERE status IN ('pending','completed') ORDER BY due_at,title",
         )
-        result = {"todos": self.tasks(todos)}
+        todos = [redact_todo(todo, self.context.store.local_identities) for todo in todos]
+        accounting = await asyncio.to_thread(
+            extraction_stats, self.context.store, 1, now=self.now, monday=self.monday
+        )
+        result = {"todos": self.tasks(todos), "extraction": accounting["weeks"][0]}
         upcoming = self.next_week(todos)
         result["next_week"] = {
             "from": self.end.date().isoformat(),
@@ -97,9 +102,9 @@ class Inputs:
             if todos
             else MISSING,
         }
-        for identifier in ("homework", "timetable", "campus", "health", "token_usage"):
+        for identifier in ("homework", "timetable", "campus", "health"):
             plugin = self.context.get_plugin(identifier) if self.context.get_plugin else None
-            key = {"campus": "activities", "token_usage": "tokens"}.get(identifier, identifier)
+            key = {"campus": "activities"}.get(identifier, identifier)
             result[key] = missing()
             if plugin is None:
                 continue
@@ -110,10 +115,16 @@ class Inputs:
             except Exception:
                 # One unavailable plugin must not prevent the other sections being read.
                 result[key] = missing()
+        goals = self.context.get_plugin("goals") if self.context.get_plugin else None
+        if goals is not None:
+            result["goals"] = goals.weekly_input(
+                min(self.now.date(), (self.end - timedelta(days=1)).date())
+            )
         return result
 
     async def homework(self, plugin):
         todos = await asyncio.to_thread(plugin.homework)
+        todos = [redact_todo(todo, self.context.store.local_identities) for todo in todos]
         return {**self.tasks(todos), "next_week": self.next_week(todos) if todos else MISSING}
 
     async def timetable(self, plugin):
@@ -180,19 +191,4 @@ class Inputs:
             else MISSING,
             "readiness_from": ready[0]["date"] if ready else None,
             "readiness_to": ready[-1]["date"] if ready else None,
-        }
-
-    async def token_usage(self, plugin):
-        last = self.monday + timedelta(days=6)
-        ledger = await asyncio.to_thread(
-            Ledger, self.context.store.db, self.zone, last, plugin.config
-        )
-        if not any(self.monday <= row["day"] <= last for row in ledger.rows):
-            return missing()
-        return {
-            "status": "ok",
-            "total": ledger.total(self.monday, last),
-            "assistant": ledger.total(self.monday, last, own=False),
-            "own": ledger.total(self.monday, last, own=True),
-            "note": "输入（含缓存）加输出；仅统计有日期的记录，不拆分手填的累计用量。",
         }

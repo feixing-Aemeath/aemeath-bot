@@ -95,7 +95,7 @@ fun BotSidebar(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("●", fontSize = 9.sp, color = if (state.online) Color(0xFF7CA58A) else Color.Gray)
-            Muted(if (model.device.mock) "模拟数据" else if (state.online) "Mac 在线" else "连不上")
+            Muted(if (model.device.mock) "模拟数据" else if (state.online) "后端在线" else "连不上")
         }
         TextButton(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("⚙  设置") }
     }

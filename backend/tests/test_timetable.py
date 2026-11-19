@@ -14,7 +14,7 @@ from core.models import PluginPatch
 from core.service import Service
 from plugins.screen.model import TextBlock
 from plugins.timetable import page
-from plugins.timetable.page import PageError, parse_week
+from plugins.timetable.page import PageError, parse_month, parse_week
 from tests.conftest import RecordingAppleBridge
 from tests.test_school import ZONE, call
 
@@ -101,6 +101,134 @@ def test_other_views_are_not_read_as_a_week():
     assert empty.monday == MONDAY and empty.entries == ()
 
 
+def test_wrapped_course_time_is_read_as_one_range():
+    blocks = week_page(courses=[(0, "09:55-", ["11:30", "俱乐部体育1"])])
+    week = parse_week(blocks, NOW.date())
+    assert [(e.start, e.end, e.title) for e in week.entries] == [("09:55", "11:30", "俱乐部体育1")]
+
+
+def test_a_clock_in_the_course_title_is_kept_as_title_text():
+    title = "实验课（14:00签到）"
+    week = parse_week(week_page(courses=[(0, "14:00-15:35", [title])]), NOW.date())
+    assert [e.title for e in week.entries] == [title]
+
+
+@pytest.mark.parametrize("span", ["08:00-29:35", "09:35-08:00", "08:00-0g:35"])
+def test_bad_course_times_are_not_silently_dropped(span):
+    with pytest.raises(PageError, match="^timetable_entries_unreadable$"):
+        parse_week(week_page(courses=[(0, span, ["大学英语"])]), NOW.date())
+
+
+NOVEMBER = {  # weekday: the courses of that day, every week
+    0: [("09:55-11:30", ["俱乐部体育1"]), ("14:00-15:35", ["写作与沟通"])],
+    1: [("08:00-09:35", ["大学英语（1）"]), ("09:55-12:20", ["高等数学|（A）"])],
+    3: [("08:00-09:35", ["大学英语（1）"]), ("15:55-18:20", ["思想道德与法治"])],
+}
+
+
+def month_page(shown=date(2026, 11, 1), courses=NOVEMBER, picker=True, misread=None):
+    """Text blocks as Vision returns them for the month view (月历): day numbers ("11 01" on
+    a month's first) over a lunar date, then each course's time and title; days of the
+    months before and after show no courses."""
+    first = shown.replace(day=1)
+    start = first - timedelta(days=first.weekday())
+    blocks = [
+        block("学校门户-个人日程", 0.124, 0.010, 0.092),
+        block("周历", 0.622, 0.124, 0.019),
+        block("月历", 0.658, 0.124, 0.020),
+        block("个人日程", 0.748, 0.184, 0.036),  # the legend on the right
+        block("我的课程", 0.747, 0.248, 0.038),
+    ]
+    if picker:
+        blocks.append(block(shown.isoformat(), 0.164, 0.124, 0.054, 0.012))
+    for index in range(7):
+        blocks.append(
+            block(f"周{'一二三四五六日'[index]}", 0.147 + index * 0.087, 0.153, 0.017, 0.01)
+        )
+    for row in range(6):
+        top = 0.174 + row * 0.13
+        for index in range(7):
+            day = start + timedelta(weeks=row, days=index)
+            x = 0.131 + index * 0.087
+            number = f"{day.month}{day.day:02d}" if day.day == 1 else f"{day.day:02d}"
+            blocks.append(block(number, x + 0.016, top, 0.015, 0.011))
+            blocks.append(block("廿四", x + 0.016, top + 0.013, 0.015, 0.009))
+            if day.month != first.month:
+                continue
+            y = top + 0.03
+            for span, lines in courses.get(index, []):
+                if misread and day == misread[0] and lines == [misread[1]]:
+                    lines = [misread[2]]
+                for text in [span, *lines]:
+                    blocks.append(block(text, x, y, 0.048, 0.01))
+                    y += 0.011
+                y += 0.011
+    return blocks
+
+
+def test_the_month_view_gives_the_weeks_wholly_inside_the_month():
+    weeks = parse_month(month_page(misread=(date(2026, 11, 5), "思想道德与法治", "思根道德与法治")))
+    # 10/26–11/1 and 11/30–12/6 cross the month's edge: the month view shows nothing on the
+    # other month's days, so those weeks are left to the week view and the guessing.
+    assert [w.monday for w in weeks] == [date(2026, 11, d) for d in (2, 9, 16, 23)]
+    assert [len(w.entries) for w in weeks] == [6, 6, 6, 6]
+    first = weeks[0].entries
+    assert [(e.day.day, e.start, e.end, e.title, e.kind) for e in first[:3]] == [
+        (2, "09:55", "11:30", "俱乐部体育1", "课程"),
+        (2, "14:00", "15:35", "写作与沟通", "课程"),
+        (3, "08:00", "09:35", "大学英语（1）", "课程"),
+    ]
+    # A one-character misread takes the spelling the other weeks show.
+    assert {e.title for w in weeks for e in w.entries} == {
+        "俱乐部体育1", "写作与沟通", "大学英语（1）", "高等数学I（A）", "思想道德与法治"
+    }  # fmt: skip
+
+
+def test_a_month_view_without_its_month_is_not_guessed():
+    with pytest.raises(PageError, match="^timetable_month_unreadable$"):
+        parse_month(month_page(picker=False))
+    # The picker says October while the day numbers are November's: a misread, not October.
+    wrong = [b for b in month_page() if b.text != "2026-11-01"]
+    wrong.append(block("2026-10-01", 0.164, 0.124, 0.054, 0.012))
+    with pytest.raises(PageError, match="^timetable_month_unreadable$"):
+        parse_month(wrong)
+    with pytest.raises(PageError, match="^timetable_not_week_view$"):
+        parse_month(week_page())
+
+
+def test_missing_month_row_cannot_shift_later_courses_into_an_earlier_week():
+    # OCR lost the day numbers for 11/23–29, but retained that row's course text.
+    top = 0.174 + 4 * 0.13
+    blocks = [
+        b
+        for b in month_page()
+        if not (abs(b.y - top) < 0.001 and page.DAY_NUMBER.fullmatch(page.compact(b.text)))
+    ]
+    with pytest.raises(PageError, match="^timetable_month_unreadable$"):
+        parse_month(blocks)
+
+
+def test_month_spelling_keeps_distinct_courses_and_corrects_the_same_slot():
+    courses = {
+        0: [("08:00-09:35", ["大学英语（1）"])],
+        1: [("08:00-09:35", ["大学英语（1）"])],
+        2: [("08:00-09:35", ["大学英语（2）"])],
+        3: [("15:55-18:20", ["思想道德与法治"])],
+    }
+    weeks = parse_month(month_page(courses=courses))
+    assert {e.title for w in weeks for e in w.entries} == {
+        "大学英语（1）",
+        "大学英语（2）",
+        "思想道德与法治",
+    }
+    entries = (
+        page.Entry(date(2026, 11, 2), "08:00", "09:35", "写作与交流", "课程"),
+        page.Entry(date(2026, 11, 9), "08:00", "09:35", "写作与交流", "课程"),
+        page.Entry(date(2026, 11, 3), "08:00", "09:35", "写作与交谈", "课程"),
+    )
+    assert page.settle_spelling(entries) == entries  # another weekday is a different course
+
+
 @pytest.fixture
 def mac(tmp_path):
     return Service(
@@ -170,7 +298,7 @@ async def test_a_read_fills_the_cards_the_day_file_and_the_tool(mac, screen, tmp
         assert "state" not in later[1]["data"]["items"][0]
         plugin.now = lambda: NOW
         assert "**周四** 15:55 思想道德与法治" in cards[2]["data"]["text"]
-        assert "今天 07:30 读到 10月19日–25日 那周" in cards[2]["data"]["text"]
+        assert "今天 07:30 读到这一周" in cards[2]["data"]["text"]
         # Today's classes go first on 作业Bot's page; the week is also a table, today's column
         # (Tuesday) marked, with no Saturday or Sunday when they have nothing.
         assert cards[0]["data"]["first"] is True and "first" not in cards[1]["data"]
@@ -184,7 +312,7 @@ async def test_a_read_fills_the_cards_the_day_file_and_the_tool(mac, screen, tmp
             ],
             "highlight": 2,
         }
-        assert week["footnote"] == "今天 07:30 读到 10月19日–25日 那周。"
+        assert week["footnote"] == "今天 07:30 读到这一周。"
 
         part = await plugin.daily(date(2026, 10, 20))
         assert part["file"] == "课程.md" and part["bot"] == "作业Bot"
@@ -233,6 +361,89 @@ async def test_a_new_read_replaces_its_week(mac, screen, tmp_path):
         assert (await plugin.daily(date(2026, 10, 28)))[
             "summary"
         ] == "1 节课：08:00 大学生职业发展与就业指导（A）"
+    finally:
+        await mac.close()
+
+
+async def test_same_class_start_with_different_ends_keeps_both_entries(mac, screen, tmp_path):
+    screen["blocks"] = week_page(
+        courses=[(1, "08:00-09:35", ["大学英语"]), (1, "08:00-11:30", ["大学英语"])]
+    )
+    week = parse_week(screen["blocks"], NOW.date())
+    assert len(week.entries) == 2
+    plugin = await started(mac, tmp_path)
+    try:
+        plugin.store_week(week, NOW)
+        rows, _ = plugin.day_entries(NOW.date())
+        assert {(r["start_time"], r["end_time"]) for r in rows} == {
+            ("08:00", "09:35"),
+            ("08:00", "11:30"),
+        }
+        plugin.store_week(week, NOW)
+        assert len(plugin.day_entries(NOW.date())[0]) == 2
+        assert len(plugin.calendar_entries()) == 2
+        await plugin.sync_calendar()
+        assert {item["end_at"] for item in calendar_items(mac).values()} == {
+            "2026-10-20T09:35:00+08:00",
+            "2026-10-20T11:30:00+08:00",
+        }
+        mac.apple.bridge.calls.clear()
+        await plugin.sync_calendar()
+        assert mac.apple.bridge.calls == []
+    finally:
+        await mac.close()
+
+
+@pytest.mark.parametrize("view", ["week", "month"])
+async def test_partial_course_ocr_keeps_saved_courses_and_calendar(mac, screen, tmp_path, view):
+    plugin = await started(mac, tmp_path)
+    try:
+        screen["blocks"] = week_page() if view == "week" else month_page()
+        if view == "month":
+            plugin.now = lambda: NOW.replace(month=11, day=3)
+        await plugin.read()
+        saved = mac.db.rows("SELECT * FROM timetable_entries ORDER BY day,start_time,title")
+        weeks = mac.db.rows("SELECT * FROM timetable_weeks ORDER BY monday")
+        status = plugin.status()
+        mac.apple.bridge.calls.clear()
+        # One time range was read, but OCR missed its title. Do not treat that as a deletion.
+        screen["blocks"] = [b for b in screen["blocks"] if b.text != "俱乐部体育1"]
+        with pytest.raises(RuntimeError, match="^timetable_entries_unreadable$"):
+            await plugin.read()
+        assert mac.db.rows("SELECT * FROM timetable_entries ORDER BY day,start_time,title") == saved
+        assert mac.db.rows("SELECT * FROM timetable_weeks ORDER BY monday") == weeks
+        assert plugin.status()["read_at"] == status["read_at"]
+        assert mac.apple.bridge.calls == []
+    finally:
+        await mac.close()
+
+
+async def test_unknown_days_are_not_shown_as_no_classes(mac, screen, tmp_path):
+    plugin = await started(mac, tmp_path)
+    try:
+        plugin.now = lambda: NOW + timedelta(weeks=5)
+        cards = {c["title"]: c for c in await plugin.cards()}
+        for title in ("今天的课", "明天的课"):
+            assert "还没读到" in cards[title]["data"]["text"]
+            assert "没有课" not in cards[title]["data"]["text"]
+    finally:
+        await mac.close()
+
+
+async def test_a_read_of_the_month_view_saves_its_weeks_and_keeps_the_others(mac, screen, tmp_path):
+    plugin = await started(mac, tmp_path)
+    try:
+        assert (await plugin.daily(date(2026, 10, 20)))["summary"].startswith("2 节课")
+        screen["blocks"] = month_page()
+        await plugin.read()
+        assert plugin.status()["error"] is None and plugin.status()["week"] == "2026-11-23"
+        # November's weeks are read, not guessed; the week read before stays as it was.
+        assert (await plugin.daily(date(2026, 11, 5)))["summary"] == (
+            "2 节课：08:00 大学英语（1）、15:55 思想道德与法治"
+        )
+        assert (await plugin.daily(date(2026, 10, 20)))["summary"].startswith("2 节课")
+        # 11/30 starts a week that ends in December: guessed from 11/23.
+        assert (await plugin.daily(date(2026, 11, 30)))["summary"].endswith("（推测）")
     finally:
         await mac.close()
 
@@ -306,6 +517,56 @@ async def test_the_watchdog_hears_of_a_page_unread_or_left_on_an_old_week(mac, s
         page_entry, week_entry = await plugin.watch()
         assert week_entry["title"] == "课表页面停在旧的一周"
         assert week_entry["ok_at"] == "2026-10-26T00:00:00+08:00"
+    finally:
+        await mac.close()
+
+
+async def test_a_month_already_read_needs_no_alerts_while_reads_fail(mac, screen, tmp_path):
+    """As on 11/6: November read from the month view on 11/1, the page left on 10/26–11/1
+    afterwards, and the display off at night. The classes are right, so nothing says otherwise."""
+    plugin = await started(mac, tmp_path)
+    try:
+        plugin.now = lambda: datetime(2026, 11, 1, 15, 0, tzinfo=ZONE)
+        screen["blocks"] = month_page()
+        await plugin.read()
+        friday = datetime(2026, 11, 6, 14, 30, tzinfo=ZONE)
+        plugin.now = lambda: friday
+        screen["blocks"] = week_page(monday=date(2026, 10, 26))
+        await plugin.read()
+        cards = await plugin.cards()
+        assert "停在" not in str(cards)
+        week = next(c for c in cards if c["title"] == "这周课表")
+        assert week["data"]["footnote"] == "11月1日 15:00 读到这一周。"
+        assert [e["key"] for e in await plugin.watch()] == ["page"]
+
+        night = friday.replace(hour=23)
+        plugin.now = lambda: night
+        screen["blocks"] = "screen_locked"
+        with pytest.raises(RuntimeError, match="^screen_locked$"):
+            await plugin.read()
+        cards = await plugin.cards()
+        assert "课表没读到" not in [c["title"] for c in cards]
+        [entry] = await plugin.watch()
+        assert entry["ok_at"] == night.isoformat() and entry["jobs"] == ["read"]
+        # A problem the user has to fix (the site logged out) is still told, last and calmly.
+        screen["blocks"] = "screen_page_not_open"
+        with pytest.raises(RuntimeError, match="^screen_page_not_open$"):
+            await plugin.read()
+        cards = await plugin.cards()
+        assert cards[0]["title"] == "今天的课" and cards[-1]["title"] == "课表没读到"
+        assert "不急" in cards[-1]["data"]["text"] and "first" not in cards[-1]["data"]
+
+        # A week before the classes run out (11/30 starts a week the month did not give),
+        # the failing page is an alert again.
+        screen["blocks"] = "screen_locked"
+        late = datetime(2026, 11, 24, 23, 0, tzinfo=ZONE)
+        plugin.now = lambda: late
+        with pytest.raises(RuntimeError, match="^screen_locked$"):
+            await plugin.read()
+        assert (await plugin.cards())[0]["title"] == "课表没读到"
+        [entry] = await plugin.watch()
+        assert entry["ok_at"] == friday.isoformat()
+        assert "HDMI" in entry["hint"] and "需要密码" not in entry["hint"]
     finally:
         await mac.close()
 

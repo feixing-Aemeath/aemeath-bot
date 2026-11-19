@@ -8,14 +8,27 @@ public struct Card: Codable, Hashable, Identifiable, Sendable {
     public var type: CardType
     public var title: String
     public var data: JSONValue
+    /// The plugin it came from, which the backend fills in (older backends leave it out): the
+    /// dashboard sorts /today's cards by Bot with it.
+    public var plugin: String?
+    /// When the backend copied it into a chat reply (a card a Bot attached); nil elsewhere.
+    public var takenAt: Date?
 
-    public init(type: CardType, title: String, data: JSONValue) {
+    public init(type: CardType, title: String, data: JSONValue, plugin: String? = nil, takenAt: Date? = nil) {
         self.type = type
         self.title = title
         self.data = data
+        self.plugin = plugin
+        self.takenAt = takenAt
     }
 
-    public var id: String { "\(type.rawValue):\(title)" }
+    enum CodingKeys: String, CodingKey {
+        case type, title, data, plugin
+        case takenAt = "taken_at"
+    }
+
+    /// Two plugins may each have a card of the same type and title.
+    public var id: String { "\(plugin.map { "\($0):" } ?? "")\(type.rawValue):\(title)" }
 
     public var content: CardContent { CardContent(card: self) }
 
@@ -168,6 +181,25 @@ public struct CardChart: Hashable, Sendable {
     public var value: String? = nil
     public var label: String? = nil
     public var target: Target? = nil
+    /// False for a line that lives in a narrow band far from zero (resting heart rate 55–62),
+    /// which an axis from zero would flatten: the axis then fits the values, without the fill.
+    public var zero: Bool = true
+
+    /// The x values in order, each once (the first series', then any the others add).
+    public var categories: [String] {
+        var seen = Set<String>()
+        return series.flatMap { $0.points.map(\.x) }.filter { seen.insert($0).inserted }
+    }
+
+    /// The x values that get a label under the chart: all of them while there are at most
+    /// `most`; on a long chart (30 nights, a Bot's chart in a reply) about that many, evenly
+    /// spaced back from the newest, which always has one.
+    public func axisLabels(most: Int = 7) -> [String] {
+        let all = categories
+        guard all.count > most, most > 1 else { return all }
+        let step = Int((Double(all.count - 1) / Double(most - 1)).rounded(.up))
+        return stride(from: all.count - 1, through: 0, by: -step).reversed().map { all[$0] }
+    }
 }
 
 public struct CardPhoto: Hashable, Sendable {
@@ -312,7 +344,7 @@ public enum CardContent: Hashable, Sendable {
             let rows = value?["rows"]?.arrayValue?.map({ $0.arrayValue?.compactMap(display) ?? [] }),
             !rows.isEmpty, rows.allSatisfy({ $0.count == columns.count })
         else { return nil }
-        let highlight = value?["highlight"]?.doubleValue.map { Int($0) }
+        let highlight = value?["highlight"]?.doubleValue.flatMap(Int.init(exactly:))
         return CardTable(
             columns: columns, rows: rows,
             highlight: highlight.flatMap { (1..<columns.count).contains($0) ? $0 : nil })
@@ -346,6 +378,7 @@ public enum CardContent: Hashable, Sendable {
         return .chart(
             CardChart(
                 kind: kind, unit: data["unit"]?.stringValue, series: series,
-                value: display(data["value"]), label: data["label"]?.stringValue, target: target))
+                value: display(data["value"]), label: data["label"]?.stringValue, target: target,
+                zero: data["zero"]?.boolValue ?? true))
     }
 }

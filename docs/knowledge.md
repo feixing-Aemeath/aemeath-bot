@@ -37,19 +37,35 @@ Windows 原生后端的安装、差别和校准见 [Windows 说明](windows.md)�
 
 | 身份 | 读 | memory_write |
 | --- | --- | --- |
-| MAIN（环境中的主 ASSISTANT_TOKEN） | 全部，后台提炼/周报保持兼容 | 沿用原规则：知识库、soul.md 只读 |
+| MAIN（环境中的主 ASSISTANT_TOKEN） | 全部；仅用户主令牌，不再作为后台任务默认身份 | 沿用原规则：知识库、soul.md 只读 |
 | 旧的无 reader 的设备令牌 | mcp 权限时沿用全部读取 | 沿用原规则；tokens list 显示「未限定」，建议作废重建 |
 | Bot 对话临时令牌 | 系统区 + 用户勾选的主题 | 只能写 `Bots/<自己>/**/*.md`（soul.md 除外）和 `每日/**/*.md` |
 | 未映射角色的插件对话临时令牌 | 仅系统区，无主题区 | 不开放 memory_write |
 | 带 Agent reader 的设备令牌 | 仅勾选区域 | 只能写可读系统区的 Markdown，不能写 Bots、知识库 |
 | 整理临时令牌 | 仅当前一个有读者的主题 | 不能调用 memory_write；专用 knowledge_note_write 只写本主题整理目录 |
+| 其他后台任务临时令牌 | 仅本次运行显式授权的文件；未声明时为空 | 不开放 memory_write；只用获准的业务写工具 |
 | App 权限令牌（用户本人） | 知识库 HTTP 接口看全部 | 通过上传接口添加原资料，不覆盖已有文件 |
 
 Bot 的每日写入目前允许整个 `每日/**`：插件可动态返回文件名和负责 Bot，尚未建立完整、稳定的文件归属表；提示词仍要求只改自己负责文件的「## 笔记」。跨角色长期记忆写入已由后端阻止。没有 reader 的主令牌与旧设备令牌是兼容例外，不应分发给需要受限的 Agent。
 
 临时令牌与设备令牌同为 `a24_` 加 256 位随机数，只保存在当前服务进程内，不写数据库、不输出日志。每次 harness 尝试有独立令牌，运行成功、失败、取消或超时都撤销，最长有效期为 `agent_timeout + 30` 秒。Claude Code、Codex 的 stdio 桥接和 DeepSeek 的内部工具请求使用同一个临时身份机制，不再给 Bot CLI 主令牌。
 
-**范围只管记忆目录里的文件。** 待办、消息、摘要、chat_reply 和其他插件工具本版不按 reader 区域限制；可信本地插件仍可通过自己的代码读写文件。这不是插件或操作系统的安全沙箱。
+每次后台运行另有工具范围，与 reader 的文件夹权限分别检查。MCP `tools/list`、stdio 和 DeepSeek 的 `/internal/tools` 只列出该运行获准的工具；即使硬调已知名称，执行前也会以 `tool_not_allowed` 拒绝。文件超出本次路径范围返回 `memory_not_allowed`；搜索同时按区域权限和本次路径范围过滤，再取 limit，不返回被过滤文件的路径或摘录。`tools=None` 保留用户主令牌、设备令牌和 Bot 对话的现有工具行为。
+
+| 任务（run_agent 调用方） | 工具 | 记忆读取 | 写入范围 |
+| --- | --- | --- | --- |
+| 消息提炼（core/jobs.py） | messages_get_unprocessed、messages_search、messages_mark_processed、screen_open_chat、todos_add/list/update、digest_write、memory_read/search；插件 homework_mark、campus_event_add、campus_leave_record、campus_list、grades_record | 精确文件 `关于我.md`、`每日/<本次本地日期>/今天.md`；不能读取任何主题或其他每日文件 | 待办、摘要及列出的学校业务记录；不能写长期记忆，不能调用任何 finance_* 工具 |
+| 主题整理（core/knowledge.py） | memory_read/search、knowledge_note_write；无插件工具 | 仅本主题，且主题仍有读者；fallback 前重查 | 仅本主题 `整理/*.md`，来源和用户批注保护不变 |
+| 健康晨报/周报（health） | health_report_input、health_report_write | 仅配置的 `reports.goals_path`（默认 `健康/训练目标.md`），通过报告输入提供；没有直接 memory_read/search 工具 | 健康报告记录与插件生成的晨报/周报 Markdown |
+| 财务月报（finance） | finance_report_input、finance_report_write | 无文件读取；只有代码生成的本周期汇总输入，不含商户明细 | 仅 grant.area 指定周期的月报解读和摘要，继续校验周期 |
+| 天气晨间提醒（weather） | weather_forecast、weather_brief_write、memory_read | 当天目录中的 `今天.md`、`课程.md`、`待办.md`、`作业.md`、`活动与请假.md` 五个精确文件 | 插件提醒记录，后续由每日文件生成器展示 |
+| 本周回顾（weekly_review） | weekly_review_input、weekly_review_write | 无额外工具读取；提示词预装 `Bots/助理/soul.md` 和 `记忆.md` | 插件周回顾记录及 `周报/YYYY-Www.md` |
+| Bot 对话（core/chat.py） | 工具列表及业务工具现有权限不变 | 按原 Bot/system 身份检查 | 按原角色记忆、每日笔记及业务工具规则检查 |
+| 未声明能力的新后台任务 | 无 | 无 | 无 |
+
+后台调用方用 `core.tokens.task_grant()` 显式声明工具和记忆路径。`tools` 只放内置工具名；`plugin_tools` 使用 `(插件 id, mcp_tools() 原始 hook 名)` 对，不能用名称前缀或通配符授权。注册后的名称仍按 manifest 的 id 命名，不以 id 开头的 hook 自动成为 `plugin_<id>_<hook>`；只有已启用且成功注册的工具才会出现，插件刷新、停用、删除后仍要重新检查权限。记忆路径精确匹配文件，末尾 `/` 表示目录前缀，避免相似主题名扩大范围。既有 reader ACL 继续取交集，任务文件范围不改变设备的 reader 设置；健康任务由用户配置显式授权单个训练目标文件。
+
+待办、消息、摘要和插件业务数据本身不按 reader 文件夹划分；后台通过工具白名单控制入口，Bot 对话仍沿用共享业务权限。可信本地插件可通过自己的代码读写文件，专用写工具的目标约束由其实现负责。本次工具范围不是插件或操作系统的安全沙箱。
 
 **在 Mac mini 本机有终端权限的 Agent 仍可以直接读磁盘文件。** 读者令牌只能限制经本后端 HTTP/MCP 的访问。本项目没有给 Codex 提供按目录禁读的选项，`read-only` 也不等于禁止读取记忆目录；需要真正磁盘隔离时使用单独操作系统账户或隔离环境，远程电脑只拿受限 MCP 令牌。Codex 的边界与配置见 [OpenAI 官方 MCP 文档](https://developers.openai.com/codex/mcp)和[安全说明](https://developers.openai.com/codex/security)。
 
@@ -122,7 +138,7 @@ bearer_token_env_var = "AEMEATH_CODEX_TOKEN"
 
 支持 `.md`、`.txt`、`.pdf`、`.png`、`.jpg`、`.jpeg`、`.heic`、`.docx`（扩展名大小写均可）。没有读者的私人主题额外允许上传 `.csv`、`.xlsx`、`.zip`（仅保存文件，知识库不提取、不送模型）；有读者主题拒绝这些格式，并说明私人主题限制。PDF 原文件最多 500 MiB，其他格式最多 50 MiB（App 普通上传仍限 50 MiB，大文件走 DAV），文字最多 2,000,000 UTF-8 字节，超出截断并标记。原资料保持不变，PDF 的文字以 `[第 N 页]` 分隔。
 
-- macOS：`helpers/doc-text` 使用 PDFKit 逐页提取；少于约 20 个字符的页面渲染后用 Vision 的 zh-Hans/en-US 识别。图片也用 Vision；docx 用系统 `textutil -convert txt -stdout`。不联网、不需要屏幕录制或辅助功能权限。
+- macOS：`helpers/doc-text` 使用 PDFKit 逐页提取；少于约 20 个字符的页面渲染后用 Vision 的 zh-Hans/en-US 识别。图片也用 Vision；docx 在调用系统 `textutil -convert txt -stdout` 前检查 ZIP 目录，成员总展开大小最多 50 MiB、成员最多 10,000 个，超出则不启动提取进程。不联网、不需要屏幕录制或辅助功能权限。
 - Linux / 测试：`Extractor` 协议提供 `FakeExtractor`，按测试资料返回固定文字或失败；未配置假结果时明确显示提取不可用，不把二进制猜成文本。
 - 数据目录 `knowledge_text/<sha256>.json` 缓存提取文字、截断标记和简短失败状态。相同内容不重复提取；失败也缓存，文件变化后重新提取。环境修复后可删除相应数据目录缓存再运行索引，不改原文件。
 - `memory_index` 启动时和每 10 分钟扫描，把提取文字按原文件路径放进 FTS。App 上传成功先返回 pending，再安排本地提取。提取失败不影响其他文件。MCP memory_read 返回提取文字和 `extracted: true`，不返回原始二进制。

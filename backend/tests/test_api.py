@@ -1,6 +1,7 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -111,16 +112,20 @@ def test_alarm_settings_resync_existing_todos(seeded, tmp_path):
         response = client.patch("/api/v1/settings", json=settings)
         assert response.status_code == 200
         assert all(response.json()[key] == value for key, value in settings.items())
-        assert len(bridge.calls) == 4
+        assert len(bridge.calls) == 5
+        assert bridge.calls[0][:2] == ("reminders", "read")
+        assert set(bridge.calls[0][2]["reminder_ids"]) == {
+            seeded.store.todo(identifier)["reminder_id"] for identifier in (timed, dated)
+        }
         # The reminders ring; the timed todo's calendar copy stays silent.
-        assert [(r, p["alarms"]) for r, _, p in bridge.calls if p["client_id"] == timed] == [
+        assert [(r, p["alarms"]) for r, _, p in bridge.calls if p.get("client_id") == timed] == [
             ("reminders", [30, 0]),
             ("calendar", []),
         ]
         assert all(
             p["alarms"] == ([-540] if r == "reminders" else [])
             for r, _, p in bridge.calls
-            if p["client_id"] == dated
+            if p.get("client_id") == dated
         )
         assert seeded.store.todo(dated)["sync_status"] == "synced"
         bridge.calls.clear()
@@ -128,7 +133,7 @@ def test_alarm_settings_resync_existing_todos(seeded, tmp_path):
         client.patch("/api/v1/settings", json={"confidence_threshold": 0.9})
         assert bridge.calls == []
         client.patch("/api/v1/settings", json={"todo_alarm_minutes": []})
-        assert all(p["alarms"] == [] for _, _, p in bridge.calls if p["client_id"] == timed)
+        assert all(p["alarms"] == [] for _, _, p in bridge.calls if p.get("client_id") == timed)
 
 
 @pytest.mark.parametrize(
@@ -240,7 +245,7 @@ def test_todo_with_many_merged_sources_is_served(service):
 def test_internal_bridge_and_real_mcp_http(seeded):
     with client_for(seeded) as client:
         tools = client.get("/internal/tools").json()
-        assert len(tools) == 12
+        assert len(tools) == 14
         result = client.post("/internal/tools/messages_get_unprocessed", json={}).json()
         assert result["isError"] is False
         assert "screenshot_path" not in json.dumps(result)
@@ -265,7 +270,7 @@ def test_internal_bridge_and_real_mcp_http(seeded):
             headers=headers,
             json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
-        assert len(response.json()["result"]["tools"]) == 12
+        assert len(response.json()["result"]["tools"]) == 14
         response = client.post(
             "/internal/tools/todos_add", json={"todo": candidate(seeded).model_dump(mode="json")}
         )
@@ -284,6 +289,33 @@ def test_todo_responses_carry_their_sources(seeded):
         assert patched["sources"] == todo["sources"]
 
 
+def test_cancel_and_append_sources_through_http_and_mcp(seeded):
+    original = seeded.store.add_todo(candidate(seeded))["todo"]
+    ref = seeded.store.unprocessed("feishu")[0]["id"]
+    with client_for(seeded) as client:
+        response = client.post(
+            "/internal/tools/todos_update",
+            json={"id": original["id"], "patch": {"source_refs": [ref], "notes": "地点改到 B204"}},
+        )
+        assert response.status_code == 200
+        assert response.json()["isError"] is False
+        assert json.loads(response.json()["content"][0]["text"])["source_refs"] == [
+            *original["source_refs"],
+            ref,
+        ]
+        cancelled = client.patch(
+            f"/api/v1/todos/{original['id']}",
+            json={"status": "cancelled", "notes": "老师确认活动取消"},
+        ).json()
+        assert cancelled["status"] == "cancelled" and cancelled["sync_status"] == "synced"
+        assert cancelled["reminder_id"] is None and cancelled["calendar_event_id"] is None
+        assert client.get("/api/v1/todos").json()["total"] == 0
+        assert client.get("/api/v1/today").json()["todos"] == []
+        assert client.get("/api/v1/todos?status=cancelled").json()["items"] == [cancelled]
+        listed = client.post("/internal/tools/todos_list", json={"status": "cancelled"}).json()
+        assert json.loads(listed["content"][0]["text"])["items"][0]["id"] == original["id"]
+
+
 def test_bridge_tells_the_agent_why_a_tool_failed(seeded):
     row = seeded.store.unprocessed("qq_screen")[0]
     todo = {
@@ -297,3 +329,40 @@ def test_bridge_tells_the_agent_why_a_tool_failed(seeded):
         result = client.post("/internal/tools/todos_add", json={"todo": todo}).json()
     assert result["isError"] is True
     assert "source_excerpt_mismatch" in result["content"][0]["text"]
+
+
+def test_today_summary_is_what_the_message_sources_said(service):
+    day = datetime.now(ZoneInfo(service.store.settings.timezone)).date().isoformat()
+    with client_for(service) as client:
+        assert client.get("/api/v1/today").json()["summary"] == ""
+        service.store.digest(day, "token_usage", "昨天一共用了 **338M** tokens。", append=True)
+        assert client.get("/api/v1/today").json()["summary"] == ""
+        service.store.digest(day, "qq_screen", "**通知**\n- 软件1-4班：周一排球课", append=True)
+        service.store.digest(day, "feishu", "**新待办**\n- 项目组：周报，周五 18:00", append=True)
+        service.store.digest(day, "feishu", "**通知**\n- 项目组：周三开会", append=True)
+        assert client.get("/api/v1/today").json()["summary"] == (
+            "**新待办**\n- 项目组：周报，周五 18:00\n\n"
+            "**通知**\n- 项目组：周三开会\n- 软件1-4班：周一排球课"
+        )
+
+
+def test_today_leaves_out_what_has_gone_by(service):
+    zone = ZoneInfo(service.store.settings.timezone)
+    now = datetime.now(zone)
+    day = now.date().isoformat()
+    gone = now - timedelta(days=3)
+    later = now + timedelta(days=3)
+    on = lambda moment: f"{moment.month}月{moment.day}日"  # noqa: E731
+    service.store.digest(
+        day,
+        "qq_screen",
+        f"**新待办**\n- 软件1班：班会报名，{on(gone)}\n- 高数群：作业，{on(later)}\n\n"
+        f"**还不确定**\n- 软件1班：心得{on(gone)}截止，身份待确认\n- 英语群：作文，预览，没看到全文",
+        append=True,
+    )
+    with client_for(service) as client:
+        today = client.get("/api/v1/today").json()
+    assert today["summary"] == (
+        f"**新待办**\n- 高数群：作业，{on(later)}\n\n**还不确定**\n- 英语群：作文，预览，没看到全文"
+    )
+    assert [item["text"] for item in today["unsure"]] == ["英语群：作文，预览，没看到全文"]

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import AssistantCore
+@testable import AssistantUI
 
 final class CardTests: XCTestCase {
     func card(_ json: String) throws -> Card {
@@ -105,6 +106,33 @@ final class CardTests: XCTestCase {
         guard case .text(let unmarked) = far.content else { return XCTFail() }
         XCTAssertNil(unmarked.table?.highlight)
         XCTAssertTrue(try card(#"{"type": "stat", "title": "HRV", "data": {"value": 60}}"#).isTile)
+    }
+
+    func testInvalidTableHighlightKeepsTable() throws {
+        for value in ["1.5", "1e100"] {
+            let table = try card(
+                #"{"type":"text","title":"课表","data":{"text":"课","table":{"columns":["","周一"],"rows":[["8:00","课"]],"highlight":\#(value)}}}"#
+            )
+            guard case .text(let text) = table.content else { return XCTFail() }
+            XCTAssertNotNil(text.table)
+            XCTAssertNil(text.table?.highlight)
+        }
+    }
+
+    @MainActor
+    func testLargeStatBarCanRenderAccessibilityValue() throws {
+        let large = try card(#"{"type":"stat","title":"预算","data":{"value":"很多","bar":{"max":1,"segments":[{"x":"费用","y":1e100}]}}}"#)
+        guard case .stat(let stat) = large.content else { return XCTFail() }
+        _ = SegmentBar(bar: try XCTUnwrap(stat.bar)).body
+    }
+
+    @MainActor
+    func testDonutLegendIgnoresNegativeSlicesLikeTheRing() throws {
+        let data = try card(#"{"type":"chart","title":"份额","data":{"kind":"donut","points":[{"x":"正数","y":1},{"x":"负数","y":-1e100}]}}"#)
+        guard case .chart(let chart) = data.content else { return XCTFail() }
+        let view = DonutChartView(chart: chart, slices: chart.series[0].points)
+        XCTAssertEqual(view.share(-1e100), "0%")
+        XCTAssertEqual(view.share(1), "100%")
     }
 
     func testChartSingleAndMultipleSeries() throws {

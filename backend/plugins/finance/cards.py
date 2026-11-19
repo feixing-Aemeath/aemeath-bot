@@ -33,10 +33,10 @@ def span(summary):
     return start, end, (end - start).days + 1
 
 
-def known_days(summary, last, today):
+def known_days(summary, first, last, today):
     """The days of a period that every source's bills already tell about."""
     start, end, _ = span(summary)
-    if last is None or last < start:
+    if first is None or first > start or last is None or last < start:
         return 0
     return (min(last, end, today) - start).days + 1
 
@@ -162,6 +162,12 @@ def looking_back(summary, previous):
     _, _, length = span(summary)
     per_day = f"这个月每天约 {whole(total // length)} 元"
     if previous["spent_cents"] <= 0:
+        if summary["spent_cents"] > 0:
+            return tip(
+                "账单还没覆盖整个周期",
+                ["补齐这个周期的账单后，再看看花钱的节奏", per_day],
+                "tray.and.arrow.down.fill",
+            )
         return tip(
             "还没有账单",
             ["把微信、招商银行导出的账单放进知识库「财务」，记账会自己导入", per_day],
@@ -213,16 +219,16 @@ def spending(summary):
     }
 
 
-def months(ledger, today, first, budget_cents):
-    """Each of the last six periods the bills fully cover, against the allowance."""
+def months(ledger, today, first, last, budget_cents, count=6, title="每月花销"):
+    """Each of the last `count` periods the bills fully cover, against the allowance."""
     if first is None:
         return None
     day = ledger.config.get("allowance_day", 1)
     current, _ = cycle(today, day)
     points = []
-    for offset in range(5, -1, -1):
+    for offset in range(count - 1, -1, -1):
         start = shift_month(current, -offset, day)
-        if start < first:
+        if start < first or start > last:
             continue
         end = shift_month(start, 1, day) - timedelta(days=1)
         spent = ledger.range_summary(start, end, today)["spent_cents"]
@@ -231,7 +237,7 @@ def months(ledger, today, first, budget_cents):
         return None
     return {
         "type": "chart",
-        "title": "每月花销",
+        "title": title,
         "data": {
             "kind": "bar",
             "unit": "元",
@@ -241,18 +247,35 @@ def months(ledger, today, first, budget_cents):
     }
 
 
+def months_chart(ledger, today, count):
+    """The plugin's `monthly` chart: the last `count` months the bills cover."""
+    first, last = ledger.covered()
+    budget_cents = ledger.summary("cycle", today)["budget_cents"]
+    return months(ledger, today, first, last, budget_cents, count, f"最近 {count} 个月的花销")
+
+
+def month_chart(ledger, today, months_ago):
+    """The plugin's `categories` chart: where a month's money went, 0 for this month; None
+    when that month has no spending in the bills."""
+    day = ledger.config.get("allowance_day", 1)
+    start = shift_month(cycle(today, day)[0], -months_ago, day)
+    end = shift_month(start, 1, day) - timedelta(days=1)
+    summary = ledger.range_summary(start, end, today)
+    return spending(summary) if summary["spent_cents"] > 0 else None
+
+
 def cards(ledger, today):
     summary = ledger.summary("cycle", today)
     previous = ledger.summary("previous", today)
     year = ledger.summary("year", today)
     first, last = ledger.covered()
-    known = known_days(summary, last, today)
+    known = known_days(summary, first, last, today)
     result = [budget(summary, known, last), advice(summary, previous, known)]
     # Early in a month with no bills yet, last month's ring.
     shown = summary if summary["spent_cents"] > 0 else previous
     if shown["spent_cents"] > 0:
         result.append(spending(shown))
-    if history := months(ledger, today, first, summary["budget_cents"]):
+    if history := months(ledger, today, first, last, summary["budget_cents"]):
         result.append(history)
     assets = ledger.assets()
     if assets["accounts"]:
@@ -260,6 +283,10 @@ def cards(ledger, today):
         parts = [
             f"{a['account']} {yuan(a['amount_cents'])}"
             + ("" if len(dates) == 1 else f"（{a['as_of'][5:]}）")
+            + "".join(
+                f"（含 {int(t['day'][5:7])}/{int(t['day'][8:])} 到账的生活费）"
+                for t in a.get("allowances", [])
+            )
             for a in assets["accounts"]
         ]
         label = " · ".join(parts)

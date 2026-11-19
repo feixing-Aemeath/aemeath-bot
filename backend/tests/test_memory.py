@@ -1,3 +1,9 @@
+import errno
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -35,6 +41,44 @@ def test_path_escape_rejected(service, path):
 def test_fts_query_is_literal(service):
     service.memory.write("a.md", 'quote " literal words')
     assert service.memory.search('" OR *') == []
+
+
+def test_disk_full_memory_write_keeps_original_and_removes_temp(service, monkeypatch):
+    service.memory.write("existing.md", "原来的笔记")
+    temporary_file = tempfile.NamedTemporaryFile
+
+    @contextmanager
+    def full_file(*args, **kwargs):
+        with temporary_file(*args, **kwargs) as stream:
+
+            class Output:
+                name = stream.name
+
+                def write(self, _content):
+                    stream.write("未写完的内容")
+                    raise OSError(errno.ENOSPC, "synthetic disk full")
+
+            yield Output()
+
+    monkeypatch.setattr("core.memory.tempfile.NamedTemporaryFile", full_file)
+    with pytest.raises(OSError):
+        service.memory.write("existing.md", "新的笔记")
+    assert (service.memory.root / "existing.md").read_text() == "原来的笔记"
+    assert list(service.memory.root.glob(".memory-*.tmp")) == []
+
+
+@pytest.mark.parametrize("content", ["第一行\n第二行\n", "第一行\r\n第二行\r\n"])
+def test_memory_save_preserves_line_endings_on_windows(service, monkeypatch, content):
+    temporary_file = tempfile.NamedTemporaryFile
+
+    def windows_file(*args, **kwargs):
+        kwargs.setdefault("newline", "\r\n")
+        return temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr("core.memory.tempfile.NamedTemporaryFile", windows_file)
+    service.memory.write("newlines.md", content)
+    assert (service.memory.root / "newlines.md").read_bytes() == content.encode("utf-8")
+    assert list(service.memory.root.glob(".memory-*.tmp")) == []
 
 
 async def test_unreadable_notes_do_not_block_startup(service):
@@ -114,3 +158,54 @@ def test_symlink_alias_cannot_bypass_readonly_memory(service, protected):
     with pytest.raises(ValueError, match="只读"):
         service.memory.write("别名.md", "覆盖")
     assert target.read_text(encoding="utf-8") == "用户原文"
+
+
+@pytest.mark.parametrize("query", ["共同", "共同关键词"])
+def test_deleted_matches_do_not_consume_search_limit(service, query):
+    for name in ("deleted.md", "live.md"):
+        service.memory.write(name, "共同关键词")
+    (service.memory.root / "deleted.md").unlink()
+    assert [row["path"] for row in service.memory.search(query, 1)] == ["live.md"]
+
+
+def test_reindex_does_not_lose_a_concurrent_memory_write(service, monkeypatch):
+    memory = service.memory
+    memory.write("note.md", "旧的关键词")
+    scanned, resume, indexing = threading.Event(), threading.Event(), threading.Event()
+    reader, index_one = memory.documents.read, memory.index_one
+    reindex_thread = []
+
+    def read(path, *args, **kwargs):
+        result = reader(path, *args, **kwargs)
+        if threading.get_ident() in reindex_thread and not scanned.is_set():
+            scanned.set()
+            assert resume.wait(5)
+        return result
+
+    def index(path):
+        indexing.set()
+        return index_one(path)
+
+    def reindex():
+        reindex_thread.append(threading.get_ident())
+        return memory.reindex()
+
+    monkeypatch.setattr(memory.documents, "read", read)
+    monkeypatch.setattr(memory, "index_one", index)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scan = pool.submit(reindex)
+        try:
+            assert scanned.wait(5)
+            write = pool.submit(memory.write, "note.md", "新的关键词")
+            assert indexing.wait(5)
+            try:
+                write.result(timeout=1)
+            except TimeoutError:
+                pass  # An index rebuild may serialize the writer until its snapshot is installed.
+        finally:
+            resume.set()
+        scan.result(timeout=5)
+        write.result(timeout=5)
+    assert memory.read("note.md")["content"] == "新的关键词"
+    assert memory.search("新的关键词")
+    assert memory.search("旧的关键词") == []

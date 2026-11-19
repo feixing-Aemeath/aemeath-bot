@@ -1,18 +1,47 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
-TodoStatus = Literal["pending", "completed", "deleted"]
+TodoStatus = Literal["pending", "completed", "deleted", "cancelled"]
 Title = Annotated[str, Field(min_length=1, max_length=500)]
 Text = Annotated[str, Field(max_length=50000)]
+
+
+class BotPreference(Model):
+    pinned: bool
+    custom_name: str = Field(max_length=20)
+    position: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+    visible: bool
+    updated_at: AwareDatetime
+
+    @field_serializer("updated_at", when_used="json")
+    def utc_timestamp(self, value):
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+BotID = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+BotEntries = Annotated[
+    dict[BotID, BotPreference],
+    Field(max_length=100, json_schema_extra={"additionalProperties": False}),
+]
+
+
+class BotPreferences(Model):
+    version: int = Field(ge=0)
+    entries: BotEntries
+
+
+class BotPreferencesUpdate(Model):
+    expected_version: int = Field(ge=0, strict=True)
+    entries: BotEntries
 
 
 class TodoCreate(Model):
@@ -41,17 +70,63 @@ class TodoPatch(Model):
     due_at: AwareDatetime | None = None
     has_time: bool | None = None
     status: TodoStatus | None = None
+    reason: Literal["not_a_todo", "done_elsewhere", "duplicate", "wrong_time"] | None = None
+    source_refs: list[str] | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def check_patch(self):
         if not self.model_fields_set:
             raise ValueError("empty patch")
-        for key in self.model_fields_set - {"due_at"}:
+        for key in self.model_fields_set - {"due_at", "reason"}:
             if getattr(self, key) is None:
                 raise ValueError(f"{key} cannot be null")
         if self.title is not None and not self.title.strip():
             raise ValueError("title cannot be blank")
         return self
+
+
+class MissedSource(Model):
+    plugin: str
+    chat_name: str
+
+
+class TodoNew(Model):
+    title: Title
+    notes: Text = ""
+    due_at: AwareDatetime | None = None
+    has_time: bool = False
+    missed: bool = False
+    missed_source: MissedSource | None = None
+
+    @model_validator(mode="after")
+    def check_time(self):
+        if not self.title.strip():
+            raise ValueError("title cannot be blank")
+        if self.has_time and self.due_at is None:
+            raise ValueError("has_time requires due_at")
+        return self
+
+
+class InboxItem(Model):
+    text: str = Field(min_length=1, max_length=8000)
+    note: str | None = Field(default=None, max_length=500)
+    source_app: str | None = Field(default=None, max_length=40)
+    chat_name: str | None = Field(default=None, max_length=80)
+    missed: bool = False
+
+
+class InboxAccepted(Model):
+    message_id: str
+    job_started: bool
+
+
+class OpenChat(Model):
+    chat_name: str
+
+
+class OpenChatAccepted(Model):
+    accepted: Literal[True] = True
+    job_started: bool
 
 
 class TodoSource(Model):
@@ -62,6 +137,37 @@ class TodoSource(Model):
     chat_name: str
     sender: str
     sent_at: datetime
+
+
+class TodoSourceText(TodoSource):
+    text: str = Field(max_length=4000)
+
+
+class TodoSourceTexts(Model):
+    items: list[TodoSourceText]
+
+
+class UnsureItem(Model):
+    id: str
+    text: str
+    plugin: str | None = None
+    chat_name: str | None = None
+    can_open: bool = False
+
+
+class ExtractionWeek(Model):
+    week_start: date
+    caught: int
+    with_due: int
+    late: int
+    median_lead_hours: float | None
+    missed: int
+    not_a_todo: int
+    recall: float | None
+
+
+class ExtractionStats(Model):
+    weeks: list[ExtractionWeek]
 
 
 class Todo(TodoCreate):
@@ -79,6 +185,9 @@ class Todo(TodoCreate):
     updated_at: datetime
     sync_status: Literal["pending", "synced"]
     sync_error: str | None
+    status_source: Literal["reminders"] | None
+    reminder_completed_at: datetime | None
+    user_modified_fields: list[Literal["title", "due_at", "has_time"]]
 
 
 class TodoPage(Model):
@@ -90,6 +199,9 @@ class Card(Model):
     type: Literal["list", "stat", "chart", "photo_grid", "text", "todo_list"]
     title: str
     data: dict[str, Any]
+    # Whose card it is: the core fills it in, so the App can sort /today's cards by Bot and
+    # tell apart two plugins' cards of the same type and title.
+    plugin: str | None = None
 
 
 class Digest(Model):
@@ -100,9 +212,18 @@ class Digest(Model):
     created_at: datetime
 
 
-class DigestPage(Model):
+class HistoryPage(Model):
+    has_more: bool
+    next_before: str | None
+    earlier_date: date | None
+
+
+class DigestPage(HistoryPage):
     items: list[Digest]
     total: int
+
+
+RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
 
 
 class Run(Model):
@@ -111,7 +232,7 @@ class Run(Model):
     harness: str | None
     started_at: datetime
     finished_at: datetime | None
-    status: Literal["running", "succeeded", "failed", "cancelled"]
+    status: RunStatus
     error: str | None
     attempt: int
 
@@ -152,6 +273,7 @@ class Today(Model):
     summary: str
     todos: list[Todo]
     cards: list[Card]
+    unsure: list[UnsureItem] = []
 
 
 class PluginPatch(Model):
@@ -288,7 +410,18 @@ class HealthSample(Model):
 
 
 class HealthBatch(Model):
-    samples: list[HealthSample] = Field(min_length=1, max_length=1000)
+    samples: list[HealthSample] = Field(default_factory=list, max_length=1000)
+    deleted: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=1000
+    )
+
+    @model_validator(mode="after")
+    def changes(self):
+        if not self.samples and not self.deleted:
+            raise ValueError("empty health batch")
+        if {sample.id for sample in self.samples} & set(self.deleted):
+            raise ValueError("sample cannot be added and deleted in the same batch")
+        return self
 
 
 class HealthAccepted(Model):
@@ -313,7 +446,7 @@ class HealthReport(Model):
     updated_at: datetime
 
 
-class HealthReportPage(Model):
+class HealthReportPage(HistoryPage):
     items: list[HealthReport]
     total: int
 
@@ -339,6 +472,14 @@ class MessageInput(Model):
 
 
 ChatStatus = Literal["ready", "pending", "failed"]
+Replies = Annotated[list[Annotated[str, Field(min_length=1, max_length=30)]], Field(max_length=4)]
+
+
+class ChatCard(Card):
+    """A plugin card as it was when a Bot attached it to a reply (chat_reply cards)."""
+
+    plugin: str
+    taken_at: datetime
 
 
 class ChatMessage(Model):
@@ -350,9 +491,11 @@ class ChatMessage(Model):
     error: str | None
     created_at: datetime
     updated_at: datetime
+    replies: Replies | None = None
+    cards: list[ChatCard] | None = None
 
 
-class ChatPage(Model):
+class ChatPage(HistoryPage):
     items: list[ChatMessage]
     total: int
 

@@ -1,7 +1,7 @@
 """Device tokens: one token per device, each with its own scopes, revocable on its own.
 
-`ASSISTANT_TOKEN` from the environment stays the Mac's own token with every scope; the local
-Agents' stdio bridge uses it. Other devices (iPhone, a school computer, a Shortcuts automation)
+`ASSISTANT_TOKEN` from the environment stays the Mac's own token with every scope; background
+Agents use temporary run credentials. Other devices (iPhone, a school computer, a Shortcuts automation)
 each get a device token from `python -m scripts.tokens create`.
 
 The database keeps only the SHA-256 of each token. Tokens are 256-bit random strings, so the
@@ -15,6 +15,7 @@ import unicodedata
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import PurePosixPath
 
 PREFIX = "a24_"
 SCOPES = {
@@ -41,6 +42,38 @@ class Grant:
     kind: str | None = None
     area: str | None = None
     harness: str | None = None
+    # None preserves user/device/Bot permissions; background runs use explicit sets.
+    tools: frozenset[str] | None = None
+    plugin_tools: frozenset[tuple[str, str]] = frozenset()
+    # Exact files, or directory prefixes ending in '/'. Empty means no memory reads.
+    memory_read_paths: frozenset[str] | None = None
+
+    def allows_tool(self, name, plugin=None):
+        if self.tools is None:
+            return self.kind in {None, "bot", "system", "agent"}
+        return plugin in self.plugin_tools if plugin is not None else name in self.tools
+
+
+def task_grant(name, *, tools=(), plugin_tools=(), memory_read_paths=(), kind="task", area=None):
+    """A background run starts with no tools or memory; trusted callers add capabilities."""
+    paths = set()
+    for value in memory_read_paths:
+        path = PurePosixPath(value.replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts or ":" in value or "\x00" in value:
+            raise ValueError("invalid_memory_scope")
+        if not path.parts:
+            raise ValueError("invalid_memory_scope")
+        paths.add(path.as_posix() + ("/" if value.endswith(("/", "\\")) else ""))
+    return Grant(
+        None,
+        name,
+        frozenset({"mcp"}),
+        kind=kind,
+        area=area,
+        tools=frozenset(tools),
+        plugin_tools=frozenset(plugin_tools),
+        memory_read_paths=frozenset(paths),
+    )
 
 
 MAIN = Grant(None, "ASSISTANT_TOKEN", ALL_SCOPES)

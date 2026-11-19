@@ -1,14 +1,96 @@
 package local.assistant.core
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
+import okhttp3.Call
+import okhttp3.EventListener
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import java.io.IOException
 
 class BackendTest {
+    @Test
+    fun todosFollowTotalEvenWhenTheServerReturnsShortPages() = runTest {
+        withServer { s, api ->
+            val old = testTodo("old").copy(status = "completed")
+            val future = testTodo("future").copy(dueAt = "2027-01-01T00:00:00Z")
+            s.enqueue(MockResponse().setBody(Wire.encodeToJsonElement(Page(listOf(old), 2)).toString()))
+            s.enqueue(MockResponse().setBody(Wire.encodeToJsonElement(Page(listOf(future), 2)).toString()))
+            assertEquals(listOf(old, future), api.allTodos())
+            assertEquals("0", s.takeRequest().requestUrl!!.queryParameter("offset"))
+            assertEquals("1", s.takeRequest().requestUrl!!.queryParameter("offset"))
+        }
+    }
+
+    @Test
+    fun emptyTodoPageBeforeTotalFailsInsteadOfLooping() = runTest {
+        withServer { s, api ->
+            s.enqueue(MockResponse().setBody(Wire.encodeToJsonElement(Page(listOf(testTodo()), 2)).toString()))
+            s.enqueue(MockResponse().setBody("""{"items":[],"total":2}"""))
+            expectError("decoding") { api.allTodos() }
+            assertEquals(2, s.requestCount)
+        }
+    }
+
+    @Test
+    fun cancelledRowsStillAdvanceTodoPaginationOffset() = runTest {
+        withServer { s, api ->
+            val cancelled = testTodo("cancelled").copy(status = "cancelled")
+            val pending = testTodo("pending")
+            s.enqueue(MockResponse().setBody(Wire.encodeToJsonElement(Page(listOf(cancelled), 2)).toString()))
+            s.enqueue(MockResponse().setBody(Wire.encodeToJsonElement(Page(listOf(pending), 2)).toString()))
+            assertEquals(listOf(pending), api.allTodos())
+            s.takeRequest()
+            assertEquals("1", s.takeRequest().requestUrl!!.queryParameter("offset"))
+        }
+    }
+
+    private fun cancellationClosesCall(original: Boolean) = runBlocking {
+        withServer { s, _ ->
+            val ended = CountDownLatch(1)
+            // OkHttp reports responseBodyStart after the first read returns, which a stalled body
+            // never does, so the headers are the sign that the download has reached the stall.
+            val headersRead = CountDownLatch(1)
+            val client = OkHttpClient.Builder().readTimeout(5, TimeUnit.SECONDS)
+                .eventListener(object : EventListener() {
+                    override fun callFailed(call: Call, ioe: IOException) { ended.countDown() }
+                    override fun callEnd(call: Call) { ended.countDown() }
+                    override fun responseHeadersEnd(call: Call, response: Response) { headersRead.countDown() }
+                }).build()
+            val api = LiveBackend(s.url("/").toString(), { "synthetic-token" }, client)
+            s.enqueue(if (original) MockResponse().setBody("pdf").setBodyDelay(5, TimeUnit.SECONDS)
+                else MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            val reading = launch(Dispatchers.Default) {
+                if (original) api.copyOriginal("synthetic.pdf", ByteArrayOutputStream()) else api.status()
+                fail("Cancelled requests must not succeed")
+            }
+            try {
+                assertNotNull(s.takeRequest(2, TimeUnit.SECONDS))
+                if (original) assertTrue(headersRead.await(2, TimeUnit.SECONDS))
+                reading.cancel()
+                withTimeout(1_500) { reading.join() }
+                assertTrue("Cancellation must close the HTTP call", ended.await(1_500, TimeUnit.MILLISECONDS))
+            } finally {
+                reading.cancelAndJoin()
+                client.dispatcher.executorService.shutdown()
+                client.connectionPool.evictAll()
+            }
+        }
+    }
+
+    @Test
+    fun cancellationClosesARequestWaitingForHeaders() = cancellationClosesCall(original = false)
+
+    @Test
+    fun cancellationClosesAStalledOriginalDownload() = cancellationClosesCall(original = true)
+
     private suspend fun withServer(block: suspend (MockWebServer, LiveBackend) -> Unit) {
         val server = MockWebServer()
         server.start()

@@ -160,7 +160,12 @@ object RunText {
         "report_not_written" to "简报没有写出来",
         "apple_sync_failed" to "同步提醒事项失败",
         "apple_helper_failed" to "提醒事项工具出错",
+        "macos_required" to "需要 Mac 后端同步提醒事项和日历",
         "screen_helper_failed" to "截图助手出错",
+        "screen_helper_timeout" to "截图助手超时",
+        "screen_locked" to "后端电脑已锁屏",
+        "screen_ocr_language_missing" to "未安装简体中文 OCR",
+        "screen_input_refused" to "窗口状态变化，已停止读屏",
         "screen_history_gap" to "没接上上次读到的位置",
         "screen_chat_mismatch" to "打开的会话不对",
         "screen_not_conversation_list" to "没停在消息列表（点回「消息」）",
@@ -236,7 +241,7 @@ fun PluginView.statusLine(
     if (last.status != "succeeded") return "上次运行在 $whenText，${RunText.error(last.error) ?: RunText.status(last.status)}"
     if ("source" !in provides) return "上次运行在 $whenText"
     val count = todos.count {
-        it.status != "deleted" && instant(it.createdAt) >= instant(last.startedAt) && id in it.sourcePlugin.split(',')
+        it.visible && instant(it.createdAt) >= instant(last.startedAt) && id in it.sourcePlugin.split(',')
     }
     return "上次运行在 $whenText，提取了 $count 条待办"
 }
@@ -319,7 +324,7 @@ fun digestDays(
                 .sortedBy { instant(it.startedAt) },
             written.flatMap { it.summary.lines().map(String::trim).filter(String::isNotEmpty) },
             todos.filter {
-                it.status != "deleted" && plugin in it.sourcePlugin.split(',') && format(
+                it.visible && plugin in it.sourcePlugin.split(',') && format(
                     instant(it.createdAt),
                     "yyyy-MM-dd",
                     zone

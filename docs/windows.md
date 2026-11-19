@@ -157,7 +157,7 @@ Windows 的 QQ / 微信插件不必配置 `helper`，自动使用内置 Python h
 | class_photos 苹果照片库 | `unsupported`，自动跳过，不影响其他插件 |
 | Chrome 课表自动刷新 | Windows 暂无该项，保留截图读取 |
 
-`/api/v1/status.apple_sync_error` 在 Windows 是 `macos_required`；同步任务在 runs 中明确失败为此代码，待办的 `sync_error` 相同，保留未同步状态和原有 ID。App 的列表、编辑、完成和删除照常写本地数据。接口仍是 `AppleBridge.call`，以后可接入 Mac 写入端；当前没有实现跨机器的 Apple 同步桥。
+`/api/v1/status.apple_sync_error` 在 Windows 是 `macos_required`；不调度 Apple 同步，也不执行提醒事项回读；手动运行同步任务在 runs 中明确失败为此代码，待办的 `sync_error` 相同，保留未同步状态和原有 ID。App 和 Agent 的列表、编辑、完成和删除照常写本地数据。接口仍是 `AppleBridge.call`，以后可接入 Mac 写入端；当前没有实现跨机器的 Apple 同步桥。
 
 video_notes 使用 PATH 或插件配置里的绝对路径寻找 `ffmpeg.exe`、`yt-dlp.exe`。本地幻灯片 OCR 默认用 Windows OCR，不需要编译 Swift doc-text。无字幕视频在 Windows 可使用 CPU 版 faster-whisper：
 

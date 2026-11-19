@@ -182,6 +182,40 @@ final class BotTests: XCTestCase {
             ).isEmpty)
     }
 
+    func testRunsThatWentFineSayNothingInTheChat() {
+        let assistant = Bot(
+            id: Bot.assistantID, name: "助理Bot", kind: .assistant, look: StickerLook(sticker: nil))
+        // The run log is not her voice: 「今天提炼了 6 次待办 · Codex」 is gone from the chat, and
+        // with it the unread dot every finished run lit.
+        let fine = [
+            run("8", "extract_todos", .succeeded, started: "2026-10-15T07:00:00+08:00"),
+            run("9", "extract_todos", .succeeded, started: "2026-10-15T10:00:00+08:00"),
+        ]
+        let messages = BotTimeline.messages(
+            for: assistant, today: nil, digests: [], todos: [], runs: fine, reports: [], now: now,
+            calendar: calendar)
+        XCTAssertTrue(messages.isEmpty)
+        XCTAssertEqual(BotTimeline.unread(messages, seen: nil, firstLaunch: at("2026-10-15T00:00:00+08:00")), 0)
+    }
+
+    func testChatPagesReachTheFirstLine() async throws {
+        final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 1_800_000_000) }
+        let clock = Clock()
+        let backend = MockBackend(clock: { clock.now })
+        for index in 0..<60 {
+            _ = try await backend.sendChat(
+                botID: "homework", text: "第 \(index) 句", botName: nil, choice: .automatic)
+            clock.now += MockBackend.replyDelay
+        }
+        let newest = try await backend.chat(botID: "homework", before: nil)
+        XCTAssertEqual(newest.items.count, MockBackend.chatPageSize)
+        XCTAssertEqual(newest.items.last?.text, MockBackend.replyText)
+        let earlier = try await backend.chat(botID: "homework", before: newest.nextBefore)
+        XCTAssertEqual(earlier.items.count, 20)
+        XCTAssertEqual(earlier.items.first?.text, "第 0 句")
+        XCTAssertNil(earlier.nextBefore)
+    }
+
     func testTheAssistantSaysTodaysRunsAndSummary() {
         let runs = [
             run("1", "extract_todos", .succeeded, started: "2026-10-15T10:00:00+08:00"),
@@ -204,16 +238,16 @@ final class BotTests: XCTestCase {
         let messages = BotTimeline.messages(
             for: assistant, today: today, digests: digests, todos: [], runs: runs, reports: [],
             chat: chat, now: now, calendar: calendar)
-        XCTAssertEqual(messages.map(\.id), ["run-1", "run-2", "summary-2026-10-15", "c1", "run-3"])
-        XCTAssertEqual(messages[0].text, "提炼完一次待办 · Claude Code · 用时 1 分 30 秒")
-        XCTAssertTrue(messages[1].failed)
-        XCTAssertTrue(messages[1].text.contains("（第 2 次）"))
-        XCTAssertEqual(messages[2].title, "今天的总结")
-        XCTAssertEqual(messages[2].date, at("2026-10-15T19:00:00+08:00"))
-        XCTAssertTrue(messages[4].text.hasPrefix("正在提炼待办"))
+        XCTAssertEqual(messages.map(\.id), ["run-2", "summary-2026-10-15", "c1", "run-3"])
+        // Runs that went fine say nothing; a failed or running one is its own message.
+        XCTAssertTrue(messages[0].failed)
+        XCTAssertTrue(messages[0].text.contains("（第 2 次）"))
+        XCTAssertEqual(messages[1].title, "今天的总结")
+        XCTAssertEqual(messages[1].date, at("2026-10-15T19:00:00+08:00"))
+        XCTAssertTrue(messages[3].text.hasPrefix("正在提炼待办"))
     }
 
-    func testTheChatStartsWithTheLastTwoDaysThatHaveMessages() {
+    func testTheChatStartsWithTodayAndGoesBackOneDayPerTap() {
         let messages = [
             BotMessage(id: "1", author: .bot, date: at("2026-10-24T08:00:00+08:00"), text: "a"),
             BotMessage(id: "2", author: .bot, date: at("2026-10-25T08:00:00+08:00"), text: "b"),
@@ -221,13 +255,32 @@ final class BotTests: XCTestCase {
             BotMessage(id: "4", author: .bot, date: at("2026-10-28T00:10:00+08:00"), text: "d"),
             BotMessage(id: "5", author: .bot, date: at("2026-10-28T09:00:00+08:00"), text: "e"),
         ]
-        let recent = BotTimeline.recent(messages, days: 2, calendar: calendar)
-        // Days without messages (10/26) do not count; the 27th and the 28th are shown.
-        XCTAssertEqual(recent.messages.map(\.id), ["3", "4", "5"])
-        XCTAssertEqual(recent.hiddenDays, 2)
-        XCTAssertEqual(BotTimeline.recent(messages, days: 5, calendar: calendar).messages.count, 5)
-        XCTAssertEqual(BotTimeline.recent(messages, days: 5, calendar: calendar).hiddenDays, 0)
-        XCTAssertEqual(BotTimeline.recent([], days: 2, calendar: calendar).hiddenDays, 0)
+        let today = at("2026-10-28T12:00:00+08:00")
+        let opened = BotTimeline.recent(messages, earlier: 0, now: today, calendar: calendar)
+        XCTAssertEqual(opened.messages.map(\.id), ["4", "5"])
+        // Days without messages (10/26) are skipped; the next tap shows the 27th.
+        XCTAssertEqual(
+            opened.hidden,
+            ["2026-10-27", "2026-10-25", "2026-10-24"].map { at("\($0)T00:00:00+08:00") })
+        let once = BotTimeline.recent(messages, earlier: 1, now: today, calendar: calendar)
+        XCTAssertEqual(once.messages.map(\.id), ["3", "4", "5"])
+        XCTAssertEqual(once.hidden.count, 2)
+        let all = BotTimeline.recent(messages, earlier: 5, now: today, calendar: calendar)
+        XCTAssertEqual(all.messages.count, 5)
+        XCTAssertTrue(all.hidden.isEmpty)
+        // Nothing yet today: no messages, and the button for the 28th.
+        let tomorrow = BotTimeline.recent(
+            messages, earlier: 0, now: at("2026-10-29T08:00:00+08:00"), calendar: calendar)
+        XCTAssertTrue(tomorrow.messages.isEmpty)
+        XCTAssertEqual(tomorrow.hidden.first, at("2026-10-28T00:00:00+08:00"))
+        XCTAssertTrue(BotTimeline.recent([], earlier: 0, now: today, calendar: calendar).hidden.isEmpty)
+    }
+
+    func testADigestDayKeepsABlankLineBetweenSections() {
+        XCTAssertEqual(
+            BotTimeline.spaced(["**新待办**", "- 高数：第3次作业", "**通知**", "- 周一排球课"]),
+            "**新待办**\n- 高数：第3次作业\n\n**通知**\n- 周一排球课")
+        XCTAssertEqual(BotTimeline.spaced(["一行", "两行"]), "一行\n两行")
     }
 
     func testUnreadCountsOnlyWhatTheBotSaidSinceThePageWasOpen() {
@@ -339,5 +392,43 @@ final class BotTests: XCTestCase {
         }
         XCTAssertEqual(BotList.build(plugins: [], catalog: catalog).first?.name, "助理Bot")
         XCTAssertEqual(catalog.look(role: Bot.knowledgeID).sticker, "orange_daisy")
+    }
+}
+
+final class MessageGroupTests: XCTestCase {
+    func testFollowUpsWithinTenMinutesShareTheHeader() {
+        let calendar = DueText.calendar(timeZone: TimeZone(identifier: "Asia/Shanghai")!)
+        let base = APIDateCoding.date(from: "2026-10-15T09:00:00+08:00")!
+        func bot(_ id: String, _ minutes: Double, failed: Bool = false) -> BotMessage {
+            BotMessage(id: id, author: .bot, date: base.addingTimeInterval(minutes * 60), text: id, failed: failed)
+        }
+        let messages = [
+            bot("a", 0), bot("b", 5), bot("c", 30),
+            BotMessage(id: "me", author: .me, date: base.addingTimeInterval(31 * 60), text: "问"),
+            bot("d", 32), bot("e", 33, failed: true), bot("f", 34),
+        ]
+        let starts = messages.indices.map { BotTimeline.startsGroup(at: $0, in: messages, calendar: calendar) }
+        XCTAssertEqual(starts, [true, false, true, true, true, false, true])
+    }
+}
+
+final class BotListTimeTests: XCTestCase {
+    func testTodayYesterdayAndEarlier() {
+        let calendar = DueText.calendar(timeZone: TimeZone(identifier: "Asia/Shanghai")!)
+        let now = APIDateCoding.date(from: "2026-10-15T21:00:00+08:00")!
+        func at(_ text: String) -> Date { APIDateCoding.date(from: text)! }
+        XCTAssertEqual(BotTimeline.listTime(at("2026-10-15T09:41:00+08:00"), now: now, calendar: calendar), "09:41")
+        XCTAssertEqual(BotTimeline.listTime(at("2026-10-14T23:10:00+08:00"), now: now, calendar: calendar), "昨天")
+        XCTAssertEqual(BotTimeline.listTime(at("2026-10-02T08:00:00+08:00"), now: now, calendar: calendar), "10月2日")
+    }
+}
+
+final class MessagePreviewTests: XCTestCase {
+    func testPreviewSkipsSectionNames() {
+        let date = Date(timeIntervalSince1970: 0)
+        let digest = BotMessage(id: "d", author: .bot, date: date, text: "**新待办**\n- 班级群：**学生信息核对**，今天 17:00")
+        XCTAssertEqual(digest.preview, "班级群：学生信息核对，今天 17:00")
+        XCTAssertEqual(BotMessage(id: "t", author: .bot, date: date, title: "今天的总结", text: "x").preview, "今天的总结")
+        XCTAssertEqual(BotMessage(id: "e", author: .bot, date: date, text: "**通知**\n\n").preview, "通知")
     }
 }

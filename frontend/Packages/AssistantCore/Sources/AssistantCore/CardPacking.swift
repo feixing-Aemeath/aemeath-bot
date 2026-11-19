@@ -1,8 +1,8 @@
 import Foundation
 
-/// The order and rows of a Bot's cards in a grid with no holes: cards of about the same height
-/// go together, the tallest group first, so each row holds cards of one size; a row's cards are
-/// then drawn as tall as the row, and a group's last, shorter row shares the whole width.
+/// Where a Bot's cards go, always in their order (the plugin's priority, its `first` cards
+/// leading): on the iPhone's one column each card a row, tiles two to a row; in several columns
+/// (the Mac, the iPad) rows of cells of equal height, a pair of tiles sharing one cell.
 public enum CardPacking {
     /// Columns that fit the actual detail width, including the gaps between cards.
     public static func columns(width: Double, minWidth: Double, spacing: Double) -> Int {
@@ -12,45 +12,58 @@ public enum CardPacking {
         return max(1, Int((width + spacing) / (minWidth + spacing)))
     }
 
-    /// Two cards are the same size when the shorter is at least this share of the taller.
-    public static let sameSize = 0.75
-
-    /// Rows of card indices for `columns` columns, from each card's height at one column's
-    /// width. Within a size group the cards keep their given order (the plugin's priority).
-    public static func rows(heights: [Double], columns: Int) -> [[Int]] {
+    /// Rows for several columns: the same cells as on the iPhone (a card, or two tiles that
+    /// go together), `columns` cells to a row in their order. A row's cells are drawn as tall
+    /// as its tallest, so the rows line up; two tiles in a cell stand one above the other.
+    public static func grid(tiles: [Bool], columns: Int) -> [[[Int]]] {
+        let cells = phoneRows(tiles: tiles)
         let columns = max(1, columns)
-        let tallestFirst = heights.indices.sorted {
-            heights[$0] != heights[$1] ? heights[$0] > heights[$1] : $0 < $1
-        }
-        var groups: [[Int]] = []
-        for index in tallestFirst {
-            // Compared with the group's tallest card, so a group cannot creep down in size.
-            if let tallest = groups.last?.first, heights[index] >= heights[tallest] * sameSize {
-                groups[groups.count - 1].append(index)
-            } else {
-                groups.append([index])
-            }
-        }
-        return groups.flatMap { group -> [[Int]] in
-            let ordered = group.sorted()
-            return stride(from: 0, to: ordered.count, by: columns).map {
-                Array(ordered[$0..<min($0 + columns, ordered.count)])
-            }
+        return stride(from: 0, to: cells.count, by: columns).map {
+            Array(cells[$0..<min($0 + columns, cells.count)])
         }
     }
 
+    /// The cards in the first `rows` rows, in their order: what 仪表盘 shows of a Bot before
+    /// 「还有 N 张卡片」. One column has the iPhone's rows (a card, or two tiles side by side);
+    /// several have the grid's (a pair of tiles is one cell). The cards shown pack into the same
+    /// rows again, since a tile's partner is always the next tile after it.
+    public static func firstRows(tiles: [Bool], columns: Int, rows: Int) -> [Int] {
+        let packed = columns <= 1 ? phoneRows(tiles: tiles) : grid(tiles: tiles, columns: columns).map { $0.flatMap { $0 } }
+        return packed.prefix(max(rows, 0)).flatMap { $0 }.sorted()
+    }
+
+    /// The cards in as many of the iPhone's first rows as hold at most `cards` cards (the first
+    /// row whatever it holds): its 「first couple of cards」 without splitting a pair of tiles.
+    public static func firstRows(tiles: [Bool], holding cards: Int) -> [Int] {
+        var kept: [Int] = []
+        for row in phoneRows(tiles: tiles) {
+            guard kept.isEmpty || kept.count + row.count <= cards else { break }
+            kept += row
+        }
+        return kept.sorted()
+    }
+
+    /// Columns for `count` small tiles of at least `minWidth`, with the rows as even as they can
+    /// be: seven tiles where six fit go four and three, not six and one.
+    public static func balancedColumns(count: Int, width: Double, minWidth: Double, spacing: Double) -> Int {
+        guard count > 0 else { return 1 }
+        let fit = min(count, columns(width: width, minWidth: minWidth, spacing: spacing))
+        let rows = (count + fit - 1) / fit
+        return (count + rows - 1) / rows
+    }
+
     /// Rows on the iPhone's one column: the cards in their given order (the plugins'), each
-    /// a full-width row, except tiles, which go two to a row as squares. A tile pairs with the
-    /// next tile after it, moved up if need be; one left without a partner fills its row.
+    /// a full-width row, except tiles, which go two to a row. A tile pairs with the next tile
+    /// after it, moved up if need be; one left without a partner fills its row.
     public static func phoneRows(tiles: [Bool]) -> [[Int]] {
         var rows: [[Int]] = []
-        var placed = Set<Int>()
-        for index in tiles.indices where !placed.contains(index) {
-            placed.insert(index)
-            if tiles[index], let partner = tiles.indices.first(where: { $0 > index && tiles[$0] && !placed.contains($0) }) {
-                placed.insert(partner)
-                rows.append([index, partner])
+        var unpairedRow: Int?
+        for (index, tile) in tiles.enumerated() {
+            if tile, let row = unpairedRow {
+                rows[row].append(index)
+                unpairedRow = nil
             } else {
+                if tile { unpairedRow = rows.count }
                 rows.append([index])
             }
         }

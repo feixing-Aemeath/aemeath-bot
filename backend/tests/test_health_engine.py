@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import sqlite3
@@ -17,6 +18,7 @@ from plugins.health.engine import HealthEngine
 from plugins.health.export_xml import ExportReader
 from plugins.health.storage import ObservationStore, read_days, read_nights, read_workouts
 from scripts.health_synthetic import WATCH, write_export
+from tests.health_fixtures import at
 
 END = date(2026, 10, 12)
 UNITS = {
@@ -334,6 +336,93 @@ def test_short_history_has_no_reliable_baseline(tmp_path):
     sri = engine.sleep(END, 4, today=END)["regularity"]["sri_30d"]
     assert sri["valid_day_pairs"] == 3 and not sri["reliable"]
     assert not engine.baselines(END, today=END)["metrics"]["sleep_minutes"]["30d"]["reliable"]
+
+
+def test_sleep_waking_at_cutoff_is_not_lost(tmp_path):
+    engine = HealthEngine(Database(tmp_path / "assistant.sqlite3"), tmp_path, HealthConfig())
+    engine.observations.add(
+        [("sleep", at("2026-10-12 14:00"), at("2026-10-12 18:00"), 3, "core", WATCH, "watch")],
+        "upload",
+    )
+    engine.refresh()
+    night = engine.sleep(date(2026, 10, 13), 1)["nights"][0]
+    assert night["quality"] == "ok" and night["asleep_minutes"] == 240
+
+
+def test_latest_point_at_midnight_is_not_lost(tmp_path):
+    engine = HealthEngine(Database(tmp_path / "assistant.sqlite3"), tmp_path, HealthConfig())
+    engine.observations.add(
+        [
+            ("resting_heart_rate", moment, moment, bpm, "", WATCH, "watch")
+            for moment, bpm in ((at("2026-10-12 12:00"), 55), (at("2026-10-13 00:00"), 65))
+        ],
+        "upload",
+    )
+    engine.refresh()
+    assert value(read_days(engine.db)[date(2026, 10, 13)], "resting_hr") == 65
+
+
+def test_observation_bounds_use_actual_ends(tmp_path):
+    store = ObservationStore(tmp_path / "observations.sqlite3")
+    start, end = at("2026-10-12 00:00"), at("2026-10-13 00:00")
+    store.add(
+        [
+            ("step_count", start, end, 8000, "", WATCH, "watch"),
+            ("step_count", end - 60, end, 10, "", WATCH, "watch"),
+        ],
+        "upload",
+    )
+    assert store.bounds() == {"step_count": (start, end)}
+
+
+def test_export_workout_rejects_corrupt_spans():
+    reader = ExportReader(
+        io.BytesIO(
+            b'<HealthData><Workout startDate="2020-01-01T00:00:00Z" '
+            b'endDate="2026-10-12T00:00:00Z" duration="30" durationUnit="min"/></HealthData>'
+        )
+    )
+    assert list(reader.rows()) == []
+    assert reader.counts["invalid_workouts"] == 1
+
+
+def test_refresh_retries_derivation_after_a_failure(tmp_path, monkeypatch):
+    engine = HealthEngine(Database(tmp_path / "assistant.sqlite3"), tmp_path, HealthConfig())
+    sample = {
+        "id": "first",
+        "type": "resting_heart_rate",
+        "value": 55,
+        "unit": "count/min",
+        "start_at": "2026-10-12T08:00:00+08:00",
+        "end_at": "2026-10-12T08:00:00+08:00",
+        "source": WATCH,
+    }
+    upload(engine.db, [sample])
+    engine.refresh()
+    upload(
+        engine.db,
+        [
+            {
+                **sample,
+                "id": "second",
+                "value": 65,
+                "start_at": "2026-10-12T09:00:00+08:00",
+                "end_at": "2026-10-12T09:00:00+08:00",
+            }
+        ],
+    )
+    with monkeypatch.context() as patch:
+
+        def broken(*_):
+            raise RuntimeError("synthetic derivation failure")
+
+        patch.setattr(engine, "recompute", broken)
+        with pytest.raises(RuntimeError, match="synthetic derivation failure"):
+            engine.refresh()
+    # A new process must recover even though the upload cursor already advanced.
+    recovered = HealthEngine(engine.db, tmp_path, HealthConfig())
+    recovered.refresh()
+    assert value(read_days(engine.db)[END], "resting_hr") == 60
 
 
 def test_changing_time_zone_rebuilds_every_day(small, tmp_path):

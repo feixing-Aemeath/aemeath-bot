@@ -45,7 +45,12 @@ class Videos(Model):
 def router(service):
     routes = APIRouter()
 
-    @routes.post("/api/v1/videos", response_model=Video)
+    @routes.post(
+        "/api/v1/videos",
+        response_model=Video,
+        description="添加公开视频；重复提交 failed 条目会从头重试，保留原主题。",
+        responses={409: {"description": "插件未启用或未完成队列已满（包括失败视频重试）"}},
+    )
     async def add_video(body: VideoCreate):
         return await video_plugin(service).add(body.model_dump())
 

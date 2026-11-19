@@ -145,15 +145,16 @@ class ObservationStore:
         return result
 
     def bounds(self):
-        """{kind: (first start, last end)} over all observations."""
+        """{kind: (first start, exclusive end)}; a point occupies one second for bounds."""
         result = {}
         with self.connect() as conn:
-            for kind, longest in conn.execute("SELECT kind,longest FROM kind_spans").fetchall():
+            for (kind,) in conn.execute("SELECT kind FROM kind_spans").fetchall():
                 low, high = conn.execute(
-                    "SELECT min(t_start),max(t_start) FROM observations WHERE kind=?", (kind,)
+                    "SELECT min(t_start),max(max(t_end,t_start+1)) FROM observations WHERE kind=?",
+                    (kind,),
                 ).fetchone()
                 if low is not None:
-                    result[kind] = (low, high + longest)
+                    result[kind] = (low, high)
         return result
 
 

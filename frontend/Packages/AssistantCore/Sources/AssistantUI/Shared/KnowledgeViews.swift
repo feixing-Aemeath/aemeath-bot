@@ -127,7 +127,9 @@
                     }
                 } label: {
                     LabeledContent("新主题默认谁能读") {
-                        Text(overview.defaultReaders.isEmpty ? "谁都不能" : overview.defaultReaders.joined(separator: "、"))
+                        Text(overview.defaultReaders.isEmpty ? "谁都不能" : overview.defaultReaders.map { id in
+                            overview.readers.first { $0.id == id }.map(store.readerName) ?? id
+                        }.joined(separator: "、"))
                             .lineLimit(1)
                     }
                 }
@@ -270,6 +272,14 @@
         }
     }
 
+    extension AppStore {
+        func readerName(_ reader: KnowledgeReader) -> String {
+            guard reader.isBot, let sticker = reader.sticker,
+                let bot = bots.first(where: { $0.kind != .source && $0.look.sticker == sticker }) else { return reader.id }
+            return botPreferences.displayName(for: bot.id, fallback: reader.id)
+        }
+    }
+
     /// Who may read, as small tags: a Bot in its sticker's color, an Agent in gray.
     struct ReaderChips: View {
         @EnvironmentObject private var store: AppStore
@@ -283,7 +293,7 @@
                 Wrap(spacing: 4) {
                     ForEach(readers) { reader in
                         let color = color(reader)
-                        Text(reader.id)
+                        Text(store.readerName(reader))
                             .font(.caption2.weight(.medium))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
@@ -535,8 +545,10 @@
         #endif
 
         func upload(name: String, data: Data) async {
-            guard let type = Knowledge.contentType(for: name) else {
-                store.message = "只能添加 PDF、图片、Markdown、txt 和 Word（docx）文件。"
+            guard let type = Knowledge.contentType(for: name, privateTopic: area.isTopic && area.readers.isEmpty) else {
+                store.message = area.readers.isEmpty
+                    ? "只能添加 PDF、图片、Markdown、txt、Word（docx）和账单（csv、xlsx、zip）文件。"
+                    : "只能添加 PDF、图片、Markdown、txt 和 Word（docx）文件。"
                 return
             }
             guard data.count <= 50 * 1024 * 1024 else {
@@ -770,7 +782,7 @@
                     set: { on in set(reader.id, on) })
             ) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(reader.id)
+                    Text(store.readerName(reader))
                     if always {
                         Text("始终能读").font(.caption).foregroundStyle(.secondary)
                     }

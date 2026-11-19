@@ -2,6 +2,22 @@
     import AssistantCore
     import SwiftUI
 
+    /// A Bot's page opens at its newest line and stays there as lines come in, like a chat. A
+    /// page shorter than the window starts at the top, its face first: anchored to the bottom
+    /// as a whole, a Bot with nothing new today sat under half a window of empty page.
+    struct ChatScrollAnchor: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(iOS 18.0, macOS 15.0, *) {
+                content
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    .defaultScrollAnchor(.top, for: .alignment)
+            } else {
+                content.defaultScrollAnchor(.bottom)
+            }
+        }
+    }
+
     /// A small colored circle for states.
     struct StatusDot: View {
         let color: Color
@@ -19,6 +35,16 @@
             case .error: return .red
             }
         }
+
+        /// A dot only when the plugin needs a look: gray while off, red when broken. Running is
+        /// the normal state and has none (every row was green, which said nothing).
+        var dotColor: Color? {
+            switch self {
+            case .enabled: return nil
+            case .disabled, .unsupported: return .gray
+            case .error: return .red
+            }
+        }
     }
 
     extension MascotState {
@@ -29,6 +55,41 @@
             case .error: return .red
             case .offline: return .gray
             }
+        }
+
+        /// A dot only when it says something: blue while working, red after an error, gray
+        /// offline; none when all is well.
+        var dotColor: Color? {
+            switch self {
+            case .idle, .done: return nil
+            default: return color
+            }
+        }
+    }
+
+    /// Something new in a Bot's chat: the same blue dot for every Bot, so a red Bot's dot does
+    /// not read as an error.
+    struct UnreadDot: View {
+        let count: Int
+
+        var body: some View {
+            Circle()
+                .fill(Palette.unread)
+                .frame(width: 8, height: 8)
+                .accessibilityLabel("\(count) 条新消息")
+        }
+    }
+
+    /// The assistant's todos left today, quiet beside its row like a mailbox count.
+    struct RemainingCount: View {
+        let count: Int
+
+        var body: some View {
+            Text("\(count)")
+                .font(.caption.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("今天还有 \(count) 件待办")
         }
     }
     /// Whether the todo reached the 「AI 待办」 list in Reminders.
@@ -73,7 +134,7 @@
         var body: some View {
             HStack(spacing: 6) {
                 StatusDot(color: store.online ? .green : .red)
-                Text(store.online ? "Mac 在线" : "连不上 Mac")
+                Text(store.authorizationIssue ?? (store.online ? "Mac 在线" : "连不上 Mac"))
                     .font(.caption)
                 if store.connection.useMockData {
                     Text("模拟数据")

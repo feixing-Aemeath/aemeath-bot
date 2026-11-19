@@ -1,0 +1,39 @@
+id: project_progress
+name: 项目进度
+version: 0.1.0
+icon: chart.bar.doc.horizontal
+description: >-
+  这个项目做到哪了：提交和合并的 PR 从本机 git 仓库实时数，工作线、接下来和里程碑读记忆目录里的一份
+  Markdown（默认 Bots/知识库/项目进度.md），改了那份文件卡片就跟着变
+platforms: [any]
+permissions: []
+schedule: null
+provides: [cards]
+mascot: {sticker: orange_daisy, accent: "#E57A3C"}
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    repos:
+      type: array
+      maxItems: 10
+      description: 要统计的本机 git 仓库，只读；不填时只统计后端所在的仓库
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, path]
+        properties:
+          name: {type: string, minLength: 1, maxLength: 30}
+          path: {type: string, minLength: 1, maxLength: 500}
+    progress_file:
+      type: string
+      minLength: 1
+      maxLength: 200
+      default: Bots/知识库/项目进度.md
+      description: 记忆目录里写工作线、接下来和里程碑的 Markdown，格式见 docs/project-progress.md
+    chart_days:
+      type: integer
+      minimum: 7
+      maximum: 60
+      default: 14
+      description: 提交柱状图看最近几天（含今天）

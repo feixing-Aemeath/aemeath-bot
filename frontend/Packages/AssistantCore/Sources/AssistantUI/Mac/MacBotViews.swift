@@ -3,8 +3,9 @@
     import AssistantCore
     import SwiftUI
 
-    /// A Bot in the sidebar: its face, its name and what it looks after; bold with a dot while
-    /// it has said something new since its page was last open. The face comes alive
+    /// A Bot in the sidebar, like a chat list: its face, its name, the last thing it said (what it
+    /// looks after until then) and when; semibold with a blue dot while there is something new
+    /// since its page was last open. The face comes alive
     /// (blinks, follows the mouse) under the mouse only: on the Mac an animation inside a list
     /// row lays out the whole list every frame, and the chosen Bot is already alive in its
     /// page's header.
@@ -15,33 +16,42 @@
 
         var body: some View {
             let unread = store.unread(bot)
+            let last = store.messages(bot).last { $0.author == .bot && !$0.preview.isEmpty }
             HStack(spacing: 10) {
                 BotAvatar(bot: bot, state: store.botState(bot), live: hovering)
                     .frame(width: bot.kind == .source ? 28 : 36, height: bot.kind == .source ? 28 : 36)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(bot.name)
-                        .font(.body.weight(unread > 0 ? .bold : .medium))
+                    // The name whole before the time: in a narrow sidebar the time gives way,
+                    // rather than the name being cut to 「爱弥…」.
+                    let name = Text(store.displayName(bot))
+                        .font(.body.weight(unread > 0 ? .semibold : .regular))
                         .lineLimit(1)
-                    Text(bot.intro)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline) {
+                            name.fixedSize()
+                            Spacer(minLength: 4)
+                            if let last {
+                                Text(BotTimeline.listTime(last.date, now: Date(), calendar: store.calendar))
+                                    .font(.caption)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize()
+                            }
+                        }
+                        name.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Text(last?.preview ?? bot.tag)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                if unread > 0 {
-                    Circle()
-                        .fill(bot.accent)
-                        .frame(width: 8, height: 8)
-                        .help("\(unread) 条新消息")
-                }
                 if bot.isAssistant, store.remainingToday > 0 {
-                    Text("\(store.remainingToday)")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(bot.accent))
+                    RemainingCount(count: store.remainingToday)
                         .help("今天还有 \(store.remainingToday) 件待办")
+                }
+                if unread > 0 {
+                    UnreadDot(count: unread).help("\(unread) 条新消息")
                 }
             }
             .padding(.vertical, 3)
@@ -80,51 +90,62 @@
 
         var state: MascotState { store.botState(bot) }
 
+        static let height: CGFloat = 112
+
         var body: some View {
-            HStack(alignment: .bottom, spacing: 16) {
+            HStack(alignment: .bottom, spacing: 14) {
                 face
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(bot.name)
-                            .font(Typography.pageTitle)
+                        Text(store.displayName(bot))
+                            .font(Typography.serif(26))
                         Text(bot.tag)
                             .font(.callout.weight(.medium))
-                            .foregroundStyle(bot.accent)
+                            .foregroundStyle(bot.accentText)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(bot.accent.opacity(0.16)))
+                            .background(Capsule().fill(bot.accent.opacity(0.14)))
                     }
                     HStack(spacing: 6) {
-                        StatusDot(color: state.color)
+                        if let color = state.dotColor { StatusDot(color: color) }
                         Text(status)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
                     .font(.callout)
                 }
-                .padding(.bottom, 20)
+                .padding(.bottom, 18)
                 Spacer(minLength: 0)
+                if bot.isAssistant {
+                    RunNowChip().padding(.bottom, 20)
+                }
             }
-            .padding(.horizontal, 20)
-            .frame(height: 150, alignment: .bottom)
+            .padding(.horizontal, 18)
+            .frame(height: Self.height, alignment: .bottom)
             .background(
                 LinearGradient(
-                    colors: [bot.accent.opacity(0.22), bot.accent.opacity(0.05)],
+                    colors: [bot.accent.opacity(0.16), bot.accent.opacity(0.03)],
                     startPoint: .topLeading, endPoint: .bottomTrailing))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: CardSurface.radius, style: .continuous))
         }
 
+        /// The character peeking up from the band's bottom edge, its face the same size for every
+        /// character (the stickers are cut differently, so the eyes set the scale, as on the iPad).
         @ViewBuilder var face: some View {
             if bot.kind == .source {
                 BotAvatar(bot: bot)
-                    .frame(width: 84, height: 84)
-                    .padding(.bottom, 24)
+                    .frame(width: 68, height: 68)
+                    .padding(.bottom, 22)
             } else {
+                let side = Self.height
+                let place = FacePlacement.band(bot.look.resolved(in: .main), side: side)
                 LiveMascot(
                     look: bot.look, state: state, since: bot.isAssistant ? store.stateSince : Date(),
                     cue: cue, interactive: true, characterAnimations: true
                 )
-                .frame(width: 150, height: 150)
+                .frame(width: place.drawn, height: place.drawn)
+                .position(place.center)
+                .frame(width: side, height: side)
                 .help("点我一下")
             }
         }
