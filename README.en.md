@@ -50,7 +50,31 @@ It also reads your timetable, health data and monthly bills. Each area has its o
 | Apps | Android phones and tablets | APK built and tested in CI; not yet tried on a device |
 | Apps | Windows desktop | MSI built and tested in CI; not yet tried on a machine |
 
-## Quick start
+## Install and connect
+
+1. **Download the App** from [Releases](https://github.com/feixing-Aemeath/aemeath-bot/releases/latest): the Mac zip, the Windows MSI or the Android APK. iPhone, iPad and Apple Watch Apps are built with Xcode, see [frontend/README.md](frontend/README.md).
+2. **Install the backend** on an always-on Mac:
+
+   ```bash
+   cd ~
+   git clone https://github.com/feixing-Aemeath/aemeath-bot.git
+   cd aemeath-bot
+   bash backend/scripts/install_mac.sh
+   claude auth login   # and/or: codex login
+   ```
+
+3. **Connect with Tailscale.** The backend listens on `127.0.0.1:8765` only. Install Tailscale on the Mac and your devices with one account, turn on MagicDNS and HTTPS Certificates in the admin console, then on the Mac:
+
+   ```bash
+   tailscale serve --bg --https=443 http://127.0.0.1:8765
+   cd ~/aemeath-bot/backend
+   uv run python -m scripts.tokens create iPhone --scope app   # one token per device, shown once
+   ```
+
+   Never use `tailscale funnel`: it exposes the backend to the internet.
+4. **Use it.** In the App, open Settings → Connection, turn off mock data, and enter `https://<machine>.<tailnet>.ts.net` and the device's token. Then turn on plugins (QQ, Feishu…) in Settings → Plugins.
+
+## Try it from source
 
 Try the whole pipeline with synthetic data, no accounts and no cloud models:
 

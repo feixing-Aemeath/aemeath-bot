@@ -91,7 +91,77 @@ flowchart LR
 | App | Windows 桌面 | CI 能打出 MSI 安装包，测试通过；还没在真机上试过 |
 | AI | Claude Code、Codex、DeepSeek | 任选其一即可 |
 
-## 快速开始
+## 部署教程
+
+最简单的用法：一台常开的 Mac 跑后端，手机和电脑上的 App 通过 Tailscale 连过去，在外面也能用。
+
+### 1. 下载 App
+
+到 [Releases](https://github.com/feixing-Aemeath/aemeath-bot/releases/latest) 下载对应的安装包：
+
+| 设备 | 怎么装 |
+| --- | --- |
+| Mac | 下载 `Aemeath-Bot-<版本>-mac.zip`，解压后拖进「应用程序」。第一次打开会被拦下，到「系统设置 → 隐私与安全性」点「仍要打开」 |
+| Windows | 下载 `Aemeath-Bot-<版本>-windows.msi`，双击安装 |
+| 安卓 | 下载 `Aemeath-Bot-<版本>-android-test.apk`，在手机上安装 |
+| iPhone、iPad、Apple Watch | 苹果不允许直接分发安装包，要用 Xcode 自己编译安装，见 [frontend/README.md](frontend/README.md) |
+
+后端没有安装包，从源码运行（下一步）。
+
+### 2. 在 Mac 上装后端
+
+在那台常开的 Mac 上打开「终端」，运行：
+
+```bash
+cd ~
+git clone https://github.com/feixing-Aemeath/aemeath-bot.git
+cd aemeath-bot
+bash backend/scripts/install_mac.sh
+```
+
+脚本会装好 uv、Python 依赖、Claude Code、Codex 和 Tailscale，生成带随机令牌的 `backend/.env`，设成开机自动启动，最后跑一遍自检。然后至少登录一个 AI（两个都登录的话，一个额度用完会自动换另一个）：
+
+```bash
+claude auth login
+codex login
+```
+
+读 QQ 屏幕、写提醒事项还要在系统设置里给权限，见 [Mac 部署](docs/mac-setup.md) 第 6、7 节。
+
+### 3. 用 Tailscale 连上后端
+
+后端只监听本机（`127.0.0.1:8765`），不对公网开放。手机和别的电脑经 Tailscale 连过来：
+
+1. Mac 和要连的设备都装 [Tailscale](https://tailscale.com/download)，登录同一个账号。
+2. 在 Tailscale 管理后台（login.tailscale.com → DNS）打开 **MagicDNS** 和 **HTTPS Certificates**。
+3. 在 Mac 上运行，然后记下它给的地址 `https://<机器名>.<tailnet 名>.ts.net`：
+
+   ```bash
+   tailscale serve --bg --https=443 http://127.0.0.1:8765
+   tailscale serve status
+   ```
+
+4. 给每台设备建一个自己的令牌（在 Mac 上运行；令牌只显示一次，直接填到那台设备上，不要发到聊天里）：
+
+   ```bash
+   cd ~/aemeath-bot/backend
+   uv run python -m scripts.tokens create iPhone --scope app
+   ```
+
+   设备丢了就只作废它的令牌：`uv run python -m scripts.tokens revoke iPhone`。
+
+不要用 `tailscale funnel`，它会把后端暴露到公网。
+
+### 4. 打开 App 使用
+
+1. 打开 App，进入「设置 → 连接」，关掉「模拟数据」。
+2. 后端地址填第 3 步的 `https://…ts.net`，令牌填刚建的那个。
+3. 底部显示「Mac 在线」就连上了。
+4. 在「设置 → 插件」里打开要用的插件（比如 QQ、飞书），填好要读的群。之后群里有截止时间的通知，会在下一次提炼后出现在 iPhone 提醒事项的「AI 待办」列表里。
+
+只想先看看界面，不连后端也行：打开「模拟数据」就能看全部页面。后端跑在 Windows 上见 [Windows 部署](docs/windows.md)。
+
+## 从源码试用
 
 先用合成数据看一遍整条流水线。不需要任何账号，也不会请求云端模型：
 
