@@ -1033,6 +1033,9 @@ async def test_the_lock_is_read_from_the_io_registry(monkeypatch):
 async def test_lock_probe_handles_ioreg_array_and_unreadable_shapes(monkeypatch, root, locked):
     from plugins.screen import helper as module
 
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("os.getuid", lambda: 501, raising=False)
+
     async def run(*_args, **_kwargs):
         return 0, plistlib.dumps(root)
 

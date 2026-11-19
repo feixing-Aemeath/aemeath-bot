@@ -64,6 +64,6 @@ Then see [docs/mac-setup.md](docs/mac-setup.md) or [docs/windows.md](docs/window
 
 ## License
 
-The code is under the [MIT License](LICENSE). The Bots' images were drawn with AI and are not covered by it.
+The code is under the [MIT License](LICENSE). The Bots' images were drawn with AI and are not covered by it: the character images in `frontend/Design/stickers/`, the App icon drawn from them, and the screenshots in `docs/images/` that show them.
 
 This is an unofficial personal project. It is not affiliated with Tencent QQ, WeChat or Feishu, or with any game or its rights holders. Use screen reading only on your own account and within each platform's terms. The health reports are not medical advice.
